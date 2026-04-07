@@ -1,0 +1,8 @@
+in/
+out/
+judge/
+judge_case_*/
+project.jar
+__pycache__/
+.vscode/
+.idea/
