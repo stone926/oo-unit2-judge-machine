@@ -10,6 +10,8 @@ import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
+INPUT_DIR = SCRIPT_DIR / "in"
+OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
@@ -60,6 +62,13 @@ def next_available_path(target_dir: Path, file_name: str) -> Path:
         index += 1
 
 
+def move_if_exists(source_path: Path, target_dir: Path) -> None:
+    if not source_path.exists() or not source_path.is_file():
+        return
+    target_path = next_available_path(target_dir, source_path.name)
+    shutil.move(str(source_path), str(target_path))
+
+
 def archive_logs() -> Path | None:
     log_files = sorted(path for path in JUDGE_DIR.glob("*.log") if path.is_file())
     if not log_files:
@@ -69,8 +78,11 @@ def archive_logs() -> Path | None:
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     for log_file in log_files:
-        target_path = next_available_path(archive_dir, log_file.name)
-        shutil.move(str(log_file), str(target_path))
+        stem = log_file.stem
+        move_if_exists(log_file, archive_dir)
+        move_if_exists(INPUT_DIR / f"{stem}.in", archive_dir)
+        move_if_exists(OUTPUT_DIR / f"{stem}.out", archive_dir)
+        move_if_exists(OUTPUT_DIR / f"{stem}.err.out", archive_dir)
 
     return archive_dir
 
