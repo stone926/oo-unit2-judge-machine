@@ -4,6 +4,16 @@
 
 ## 使用方式
 
+永不停息地测评：
+```bash
+python test/run.py
+```
+
+单轮测评：
+```bash
+python test/run.py --once
+```
+
 生成测试数据：
 
 ```bash
