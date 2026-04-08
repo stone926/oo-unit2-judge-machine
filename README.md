@@ -54,6 +54,25 @@ python test/data_generator.py
 python test/data_generator.py --count 20 --min-requests 10 --max-requests 40 --seed 20260407
 ```
 
+互测模式：
+
+```bash
+python test/data_generator.py --mode mutual
+```
+
+互测模式约束：
+
+- 第一条请求时间不早于 `1.0s`
+- 最后一条请求时间不晚于 `50.0s`
+- 每个测试点的请求条数不超过 `70`
+- 同一部电梯关联的请求数不超过 `30`
+
+互测模式示例：
+
+```bash
+python test/data_generator.py --mode mutual --count 10 --min-requests 30 --max-requests 70 --seed 20260407
+```
+
 运行评判：
 
 ```bash
