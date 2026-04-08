@@ -4,7 +4,7 @@
 
 ## 使用方式
 
-将数据投喂程序和官方输入输出`jar`包放在同目录下的`dependency`文件夹中
+将数据投喂程序和官方输入输出`jar`包放在同目录下的`dependency`文件夹中。如果想要修改，参见`judger.py`的`DEFAULT_DATAINPUT_EXE`和`DEFAULT_LIB_JAR`
 
 永不停息地测评：
 ```bash
