@@ -4,6 +4,8 @@
 
 ## 使用方式
 
+将数据投喂程序和官方输入输出`jar`包放在同目录下的`dependency`文件夹中
+
 永不停息地测评：
 ```bash
 python test/run.py

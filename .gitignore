@@ -2,7 +2,13 @@ in/
 out/
 judge/
 judge_case_*/
-project.jar
+*.jar
 __pycache__/
 .vscode/
 .idea/
+*.md
+!README.md
+*.exe
+datainput
+prompt
+dependency

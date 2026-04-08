@@ -30,8 +30,8 @@ DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "out"
 DEFAULT_LOG_DIR = SCRIPT_DIR / "judge"
 DEFAULT_PROJECT_JAR = SCRIPT_DIR / "project.jar"
 DEFAULT_SOURCE_DIR = REPO_ROOT / "src"
-DEFAULT_LIB_JAR = REPO_ROOT / "elevator1-2026.jar"
-DEFAULT_DATAINPUT_EXE = REPO_ROOT / "datainput" / "datainput_student_win64.exe"
+DEFAULT_LIB_JAR = SCRIPT_DIR / "dependency" / "elevator1-2026.jar"
+DEFAULT_DATAINPUT_EXE = SCRIPT_DIR / "dependency" / "datainput"
 
 RECEIVE_RE = re.compile(r"^RECEIVE-(\d+)-([1-6])$")
 ARRIVE_RE = re.compile(r"^ARRIVE-(B[1-4]|F[1-7])-([1-6])$")
