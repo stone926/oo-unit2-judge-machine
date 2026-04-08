@@ -1,6 +1,6 @@
 # OO Unit2 测评机
 
-全部由 `Codex GPT-5.4 xhigh`编写
+全部由 `Codex GPT-5.4 xhigh` 编写
 
 ## 使用方式
 
