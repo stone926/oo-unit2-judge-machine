@@ -4,7 +4,7 @@
 
 ## 使用方式
 
-将数据投喂程序和官方输入输出`jar`包放在同目录下的`dependency`文件夹中。如果想要修改，参见`judger.py`的`DEFAULT_DATAINPUT_EXE`和`DEFAULT_LIB_JAR`
+依赖数据投喂程序和官方输入输出 `jar` 包，默认在同目录下的 `dependency` 文件夹中寻找。
 
 永不停息地测评：
 ```bash
@@ -14,6 +14,32 @@ python test/run.py
 单轮测评：
 ```bash
 python test/run.py --once
+```
+
+`run.py` 自身支持的参数：
+
+```bash
+python test/run.py --once --sleep-seconds 1.5
+```
+
+`run.py` 也可以把参数原样透传给 `data_generator.py` 和 `judger.py`：
+
+- `--generator-args` 后面的参数会原样传给 `data_generator.py`
+- `--judger-args` 后面的参数会原样传给 `judger.py`
+- `run.py` 自身的参数请放在这两个透传段之前
+- 如果自定义测试数据目录，建议让 `--generator-args --output-dir` 和 `--judger-args --input-dir` 指向同一目录
+- `run.py` 不再默认追加 `--rebuild`；如果需要每轮强制重新打包，请显式传入
+
+透传参数示例：
+
+```bash
+python test/run.py --once --generator-args --count 20 --min-requests 10 --max-requests 40 --seed 20260407 --judger-args --rebuild --cases 1 2 3
+```
+
+自定义目录示例：
+
+```bash
+python test/run.py --generator-args --output-dir test/custom_in --judger-args --input-dir test/custom_in --output-dir test/custom_out --log-dir test/custom_judge
 ```
 
 生成测试数据：

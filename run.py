@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -17,8 +18,54 @@ DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Loop generator + judger until interrupted.")
+@dataclass(slots=True)
+class RunArgs:
+    once: bool
+    sleep_seconds: float
+    generator_args: list[str]
+    judger_args: list[str]
+
+
+@dataclass(slots=True)
+class RuntimePaths:
+    generator_output_dir: Path
+    judger_input_dir: Path
+    judger_output_dir: Path
+    judger_log_dir: Path
+
+
+def split_passthrough_args(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]:
+    run_args: list[str] = []
+    generator_args: list[str] = []
+    judger_args: list[str] = []
+    current_target = run_args
+
+    for arg in raw_args:
+        if arg == "--generator-args":
+            current_target = generator_args
+            continue
+        if arg == "--judger-args":
+            current_target = judger_args
+            continue
+        current_target.append(arg)
+
+    return run_args, generator_args, judger_args
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Loop data_generator.py + judger.py until interrupted.",
+        epilog=(
+            "run.py options should appear before passthrough sections.\n"
+            "Arguments after --generator-args are forwarded to data_generator.py.\n"
+            "Arguments after --judger-args are forwarded to judger.py.\n\n"
+            "Example:\n"
+            "  python run.py --once --generator-args --count 5 --seed 1 "
+            "--judger-args --rebuild --cases 1 2 3"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
+    )
     parser.add_argument(
         "--once",
         action="store_true",
@@ -30,7 +77,45 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="sleep between rounds",
     )
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(raw_args: list[str] | None = None) -> RunArgs:
+    parser = build_parser()
+    cli_args = sys.argv[1:] if raw_args is None else raw_args
+    run_args, generator_args, judger_args = split_passthrough_args(cli_args)
+    namespace = parser.parse_args(run_args)
+    return RunArgs(
+        once=namespace.once,
+        sleep_seconds=namespace.sleep_seconds,
+        generator_args=generator_args,
+        judger_args=judger_args,
+    )
+
+
+def resolve_command_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    return (REPO_ROOT / path).resolve()
+
+
+def resolve_runtime_paths(generator_args: list[str], judger_args: list[str]) -> RuntimePaths:
+    generator_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    generator_parser.add_argument("--output-dir", type=Path, default=INPUT_DIR)
+    generator_namespace, _ = generator_parser.parse_known_args(generator_args)
+
+    judger_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    judger_parser.add_argument("--input-dir", type=Path, default=INPUT_DIR)
+    judger_parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    judger_parser.add_argument("--log-dir", type=Path, default=JUDGE_DIR)
+    judger_namespace, _ = judger_parser.parse_known_args(judger_args)
+
+    return RuntimePaths(
+        generator_output_dir=resolve_command_path(generator_namespace.output_dir),
+        judger_input_dir=resolve_command_path(judger_namespace.input_dir),
+        judger_output_dir=resolve_command_path(judger_namespace.output_dir),
+        judger_log_dir=resolve_command_path(judger_namespace.log_dir),
+    )
 
 
 def now_text() -> str:
@@ -38,7 +123,7 @@ def now_text() -> str:
 
 
 def run_command(command: list[str], name: str) -> int:
-    print(f"[{now_text()}] start {name}: {' '.join(command)}", flush=True)
+    print(f"[{now_text()}] start {name}: {subprocess.list2cmdline(command)}", flush=True)
     completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
     print(
         f"[{now_text()}] finish {name}: return code = {completed.returncode}",
@@ -69,26 +154,27 @@ def move_if_exists(source_path: Path, target_dir: Path) -> None:
     shutil.move(str(source_path), str(target_path))
 
 
-def archive_logs() -> Path | None:
-    log_files = sorted(path for path in JUDGE_DIR.glob("*.log") if path.is_file())
+def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | None:
+    log_files = sorted(path for path in log_dir.glob("*.log") if path.is_file())
     if not log_files:
         return None
 
-    archive_dir = JUDGE_DIR / datetime.now().strftime("%Y-%m-%d-%H-%M")
+    archive_dir = log_dir / datetime.now().strftime("%Y-%m-%d-%H-%M")
     archive_dir.mkdir(parents=True, exist_ok=True)
 
     for log_file in log_files:
         stem = log_file.stem
         move_if_exists(log_file, archive_dir)
-        move_if_exists(INPUT_DIR / f"{stem}.in", archive_dir)
-        move_if_exists(OUTPUT_DIR / f"{stem}.out", archive_dir)
-        move_if_exists(OUTPUT_DIR / f"{stem}.err.out", archive_dir)
+        move_if_exists(input_dir / f"{stem}.in", archive_dir)
+        move_if_exists(output_dir / f"{stem}.out", archive_dir)
+        move_if_exists(output_dir / f"{stem}.err.out", archive_dir)
 
     return archive_dir
 
 
 def main() -> None:
     args = parse_args()
+    runtime_paths = resolve_runtime_paths(args.generator_args, args.judger_args)
     round_index = 1
     python = sys.executable
 
@@ -96,29 +182,52 @@ def main() -> None:
         raise SystemExit(f"data generator does not exist: {DATA_GENERATOR}")
     if not JUDGER.exists():
         raise SystemExit(f"judger does not exist: {JUDGER}")
+    if runtime_paths.generator_output_dir != runtime_paths.judger_input_dir:
+        print(
+            (
+                f"[{now_text()}] warning: data_generator writes to "
+                f"{runtime_paths.generator_output_dir}, but judger reads from "
+                f"{runtime_paths.judger_input_dir}"
+            ),
+            flush=True,
+        )
 
     try:
         while True:
             print(f"[{now_text()}] ===== round {round_index} =====", flush=True)
 
-            pre_archive_dir = archive_logs()
+            pre_archive_dir = archive_logs(
+                input_dir=runtime_paths.judger_input_dir,
+                output_dir=runtime_paths.judger_output_dir,
+                log_dir=runtime_paths.judger_log_dir,
+            )
             if pre_archive_dir is not None:
                 print(
                     f"[{now_text()}] archived leftover judge logs to {pre_archive_dir}",
                     flush=True,
                 )
 
-            generator_code = run_command([python, str(DATA_GENERATOR)], "data_generator")
+            generator_code = run_command(
+                [python, str(DATA_GENERATOR), *args.generator_args],
+                "data_generator",
+            )
             judger_code: int | None = None
             if generator_code == 0:
-                judger_code = run_command([python, str(JUDGER), "--rebuild"], "judger")
+                judger_code = run_command(
+                    [python, str(JUDGER), *args.judger_args],
+                    "judger",
+                )
             else:
                 print(
                     f"[{now_text()}] skip judger because data_generator failed",
                     flush=True,
                 )
 
-            archive_dir = archive_logs()
+            archive_dir = archive_logs(
+                input_dir=runtime_paths.judger_input_dir,
+                output_dir=runtime_paths.judger_output_dir,
+                log_dir=runtime_paths.judger_log_dir,
+            )
             if archive_dir is not None:
                 print(f"[{now_text()}] archived judge logs to {archive_dir}", flush=True)
             else:
