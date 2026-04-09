@@ -10,22 +10,22 @@
 - 数据投喂：`dependency/datainput`
 - 输入输出：`dependency/elevator1-2026.jar`
 
-通过`judger.py`的参数`--datainput`和`--lib-jar`修改依赖路径，若以`run.py`启动，需要通过`--judger-args`透传：
+通过 `judger` 的参数 `--datainput` 和 `--lib-jar` 修改依赖路径，若以 `run.py` 启动，需要通过 `--judger-args` 透传：
 ```bash
 python run.py --judger-args --datainput in.exe --lib-jar lib.jar
 ```
 
 ### 项目打包
 
-测评需要将待测试的源代码打包为`jar`，默认源代码路径为工程根目录下的`src`，默认`java`主类为`oo.Main`。通过`judger`的参数`--source-dir`和`--main-class`更改，例如：
+测评需要将待测试的源代码打包为 `jar`，默认源代码路径为工程根目录下的 `src`，默认 `java` 主类为 `oo.Main`。通过 `judger` 的参数 `--source-dir` 和 `--main-class` 更改，例如：
 ```bash
 python run.py --mutual --judger-args --main-class MainClass
 ```
-其中`--mutual`为互测模式，使`data-generator`生成的数据都符合互测限制，使`judger`的校验都依照互测标准（主要是时间限制）
+其中 `--mutual` 为互测模式，使 `data-generator` 生成的数据都符合互测限制，使 `judger` 的校验都依照互测标准（主要是时间限制）
 
-打包后的项目`jar`包默认为同目录下的`project.jar`。通过`judger`的参数`--project-jar`修改：
+打包后的项目 `jar` 包默认为同目录下的 `project.jar`。通过 `judger` 的参数 `--project-jar` 修改：
 ```bash
-python run.pu --judger-args --project-jar tested.jar
+python run.py --judger-args --project-jar tested.jar
 ```
 
 ### 启动测评
