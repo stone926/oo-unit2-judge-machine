@@ -6,6 +6,8 @@
 
 依赖数据投喂程序和官方输入输出 `jar` 包，默认在同目录下的 `dependency` 文件夹中寻找。
 
+测评需要将待测试的工程打包为`jar`，默认`java`主类为`oo.Main`。通过启动参数`--judger-args --main-class <你的java主类>`更改
+
 永不停息地测评：
 ```bash
 python test/run.py
