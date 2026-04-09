@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Arguments after --generator-args are forwarded to data_generator.py.\n"
             "Arguments after --judger-args are forwarded to judger.py.\n\n"
             "Example:\n"
-            "  python run.py --once --generator-args --count 5 --seed 1 "
+            "  python run.py --once --generator-args --count 5 "
             "--judger-args --rebuild --cases 1 2 3"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,

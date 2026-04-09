@@ -57,7 +57,7 @@ python test/run.py --once --mutual --sleep-seconds 1.5
 透传参数示例：
 
 ```bash
-python test/run.py --once --generator-args --count 20 --min-requests 10 --max-requests 40 --seed 20260407 --judger-args --rebuild --cases 1 2 3
+python test/run.py --once --generator-args --count 20 --min-requests 10 --max-requests 40 --judger-args --rebuild --cases 1 2 3
 ```
 
 自定义目录示例：
@@ -73,11 +73,12 @@ python test/data_generator.py
 ```
 
 每个测试点会同时生成带时间戳的 `<i>.in` 和不带时间戳的 `<i>.no.in`。
+`data_generator.py` 每次运行都会自动使用随机 `seed`，并在输出中打印本次使用的 `seed`。
 
 常用参数示例：
 
 ```bash
-python test/data_generator.py --count 20 --min-requests 10 --max-requests 40 --seed 20260407
+python test/data_generator.py --count 20 --min-requests 10 --max-requests 40
 ```
 
 互测模式：
@@ -96,7 +97,7 @@ python test/data_generator.py --mutual
 
 互测模式示例：
 ```bash
-python test/data_generator.py --mutual --count 10 --min-requests 30 --max-requests 70 --seed 20260407
+python test/data_generator.py --mutual --count 10 --min-requests 30 --max-requests 70
 ```
 
 运行评判：

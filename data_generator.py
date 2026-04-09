@@ -316,7 +316,7 @@ def write_case_without_timestamp(path: Path, requests: list[PersonRequest]) -> N
         )
         for request in requests
     ]
-    path.write_text("\n".join(lines) + "\n\n", encoding="utf-8")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
@@ -338,12 +338,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="maximum number of requests in each case",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=20260407,
-        help="random seed for reproducible generation",
     )
     parser.add_argument(
         "--output-dir",
@@ -371,7 +365,8 @@ def main() -> None:
     elif max_requests > DEFAULT_MAX_REQUESTS:
         raise SystemExit(f"--max-requests cannot exceed {DEFAULT_MAX_REQUESTS}")
 
-    rng = random.Random(args.seed)
+    seed = random.SystemRandom().getrandbits(64)
+    rng = random.Random(seed)
     output_dir = args.output_dir.resolve()
     ensure_directory(output_dir)
     clean_matching_files(output_dir, "*.in")
@@ -392,7 +387,7 @@ def main() -> None:
 
     print(f"generated {args.count} case(s) in {output_dir}")
     print(f"mode = {MUTUAL_MODE if args.mutual else DEFAULT_MODE}")
-    print(f"seed = {args.seed}")
+    print(f"seed = {seed}")
 
 
 if __name__ == "__main__":

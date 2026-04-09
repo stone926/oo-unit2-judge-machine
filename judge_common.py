@@ -80,13 +80,13 @@ def parse_input_line(raw_line: str, path: Path, line_number: int) -> PersonReque
 def load_case(path: Path) -> list[PersonRequest]:
     requests: list[PersonRequest] = []
     seen_ids: set[int] = set()
-    terminated = False
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\r\n")
             if line == "":
-                terminated = True
-                break
+                raise CaseFormatError(
+                    f"{path}:{line_number}: blank lines are not allowed in input"
+                )
             request = parse_input_line(line, path, line_number)
             if request.person_id in seen_ids:
                 raise CaseFormatError(
@@ -98,8 +98,6 @@ def load_case(path: Path) -> list[PersonRequest]:
                 )
             seen_ids.add(request.person_id)
             requests.append(request)
-    if not terminated:
-        raise CaseFormatError(f"{path}: input must end with an empty line")
     if not 1 <= len(requests) <= 100:
         raise CaseFormatError(f"{path}: request count must be in [1, 100]")
     return requests
@@ -134,5 +132,5 @@ def write_case(path: Path, requests: list[PersonRequest]) -> None:
         )
         for request in requests
     ]
-    content = "\n".join(lines) + "\n\n"
+    content = "\n".join(lines)
     path.write_text(content, encoding="utf-8")
