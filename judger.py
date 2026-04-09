@@ -32,6 +32,8 @@ DEFAULT_PROJECT_JAR = SCRIPT_DIR / "project.jar"
 DEFAULT_SOURCE_DIR = REPO_ROOT / "src"
 DEFAULT_LIB_JAR = SCRIPT_DIR / "dependency" / "elevator1-2026.jar"
 DEFAULT_DATAINPUT_EXE = SCRIPT_DIR / "dependency" / "datainput"
+DEFAULT_TIMEOUT_SECONDS = 120
+MUTUAL_TIMEOUT_SECONDS = 180
 
 RECEIVE_RE = re.compile(r"^RECEIVE-(\d+)-([1-6])$")
 ARRIVE_RE = re.compile(r"^ARRIVE-(B[1-4]|F[1-7])-([1-6])$")
@@ -93,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR, help="source root used for fallback build")
     parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR, help="official elevator interface jar")
     parser.add_argument(
-        "--datainput-exe",
+        "--datainput",
         type=Path,
         default=DEFAULT_DATAINPUT_EXE,
         help="datainput feeder executable",
@@ -102,8 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-seconds",
         type=int,
-        default=120,
-        help="timeout for each case execution",
+        default=None,
+        help="timeout for each case execution; defaults to 120s, or 180s with --mutual",
     )
     parser.add_argument(
         "--cases",
@@ -114,10 +116,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mutual",
         action="store_true",
-        help="reserved for future mutual mode support",
+        help="enable mutual mode timeout policy",
     )
     parser.add_argument("--rebuild", action="store_true", help="force rebuild project.jar before judging")
     return parser.parse_args()
+
+
+def resolve_timeout_seconds(mutual: bool, timeout_seconds: int | None) -> int:
+    if timeout_seconds is not None:
+        return timeout_seconds
+    return MUTUAL_TIMEOUT_SECONDS if mutual else DEFAULT_TIMEOUT_SECONDS
 
 
 def run_command(command: list[str], cwd: Path) -> None:
@@ -676,7 +684,8 @@ def main() -> None:
     project_jar = args.project_jar.resolve()
     source_dir = args.source_dir.resolve()
     lib_jar = args.lib_jar.resolve()
-    datainput_exe = args.datainput_exe.resolve()
+    datainput_exe = args.datainput.resolve()
+    timeout_seconds = resolve_timeout_seconds(args.mutual, args.timeout_seconds)
 
     if not input_dir.exists():
         raise SystemExit(f"input directory does not exist: {input_dir}")
@@ -715,7 +724,7 @@ def main() -> None:
                 project_jar=project_jar,
                 lib_jar=lib_jar,
                 datainput_exe=datainput_exe,
-                timeout_seconds=args.timeout_seconds,
+                timeout_seconds=timeout_seconds,
             )
             if combined_stderr.strip():
                 message = "stderr is not empty, skipped semantic judging"
