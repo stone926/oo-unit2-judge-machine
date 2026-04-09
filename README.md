@@ -19,7 +19,7 @@ python test/run.py --once
 `run.py` 自身支持的参数：
 
 ```bash
-python test/run.py --once --sleep-seconds 1.5
+python test/run.py --once --mutual --sleep-seconds 1.5
 ```
 
 `run.py` 也可以把参数原样透传给 `data_generator.py` 和 `judger.py`：
@@ -48,6 +48,8 @@ python test/run.py --generator-args --output-dir test/custom_in --judger-args --
 python test/data_generator.py
 ```
 
+每个测试点会同时生成带时间戳的 `<i>.in` 和去掉时间戳的 `<i>.no.in`。
+
 常用参数示例：
 
 ```bash
@@ -57,7 +59,7 @@ python test/data_generator.py --count 20 --min-requests 10 --max-requests 40 --s
 互测模式：
 
 ```bash
-python test/data_generator.py --mode mutual
+python test/data_generator.py --mutual
 ```
 
 互测模式约束：
@@ -70,7 +72,7 @@ python test/data_generator.py --mode mutual
 互测模式示例：
 
 ```bash
-python test/data_generator.py --mode mutual --count 10 --min-requests 30 --max-requests 70 --seed 20260407
+python test/data_generator.py --mutual --count 10 --min-requests 30 --max-requests 70 --seed 20260407
 ```
 
 运行评判：

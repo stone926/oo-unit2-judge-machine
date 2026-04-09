@@ -21,6 +21,7 @@ JUDGER = SCRIPT_DIR / "judger.py"
 @dataclass(slots=True)
 class RunArgs:
     once: bool
+    mutual: bool
     sleep_seconds: float
     generator_args: list[str]
     judger_args: list[str]
@@ -72,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run only one round, useful for verification",
     )
     parser.add_argument(
+        "--mutual",
+        action="store_true",
+        help="forward --mutual to both data_generator.py and judger.py",
+    )
+    parser.add_argument(
         "--sleep-seconds",
         type=float,
         default=0.0,
@@ -87,6 +93,7 @@ def parse_args(raw_args: list[str] | None = None) -> RunArgs:
     namespace = parser.parse_args(run_args)
     return RunArgs(
         once=namespace.once,
+        mutual=namespace.mutual,
         sleep_seconds=namespace.sleep_seconds,
         generator_args=generator_args,
         judger_args=judger_args,
@@ -120,6 +127,12 @@ def resolve_runtime_paths(generator_args: list[str], judger_args: list[str]) -> 
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def append_flag_once(arguments: list[str], flag: str, enabled: bool) -> list[str]:
+    if not enabled or flag in arguments:
+        return list(arguments)
+    return [*arguments, flag]
 
 
 def run_command(command: list[str], name: str) -> int:
@@ -174,7 +187,9 @@ def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | Non
 
 def main() -> None:
     args = parse_args()
-    runtime_paths = resolve_runtime_paths(args.generator_args, args.judger_args)
+    generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
+    judger_args = append_flag_once(args.judger_args, "--mutual", args.mutual)
+    runtime_paths = resolve_runtime_paths(generator_args, judger_args)
     round_index = 1
     python = sys.executable
 
@@ -208,13 +223,13 @@ def main() -> None:
                 )
 
             generator_code = run_command(
-                [python, str(DATA_GENERATOR), *args.generator_args],
+                [python, str(DATA_GENERATOR), *generator_args],
                 "data_generator",
             )
             judger_code: int | None = None
             if generator_code == 0:
                 judger_code = run_command(
-                    [python, str(JUDGER), *args.judger_args],
+                    [python, str(JUDGER), *judger_args],
                     "judger",
                 )
             else:

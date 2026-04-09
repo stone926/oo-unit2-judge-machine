@@ -295,23 +295,37 @@ def generate_mutual_case(
     return requests
 
 
-def resolve_request_bounds(mode: str, min_requests: int | None, max_requests: int | None) -> tuple[int, int]:
+def resolve_request_bounds(mutual: bool, min_requests: int | None, max_requests: int | None) -> tuple[int, int]:
     resolved_min = DEFAULT_MIN_REQUESTS if min_requests is None else min_requests
-    if mode == MUTUAL_MODE:
+    if mutual:
         resolved_max = MUTUAL_MAX_REQUESTS if max_requests is None else max_requests
     else:
         resolved_max = DEFAULT_MAX_REQUESTS if max_requests is None else max_requests
     return resolved_min, resolved_max
 
 
+def write_case_without_timestamp(path: Path, requests: list[PersonRequest]) -> None:
+    ensure_directory(path.parent)
+    lines = [
+        "{}-WEI-{}-FROM-{}-TO-{}-BY-{}".format(
+            request.person_id,
+            request.weight,
+            request.from_floor,
+            request.to_floor,
+            request.elevator_id,
+        )
+        for request in requests
+    ]
+    path.write_text("\n".join(lines) + "\n\n", encoding="utf-8")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate elevator hw5 test cases.")
     parser.add_argument("--count", type=int, default=20, help="number of cases to generate")
     parser.add_argument(
-        "--mode",
-        choices=(DEFAULT_MODE, MUTUAL_MODE),
-        default=DEFAULT_MODE,
-        help="generation mode; mutual mode follows inter-test limits",
+        "--mutual",
+        action="store_true",
+        help="generate mutual-test-friendly cases",
     )
     parser.add_argument(
         "--min-requests",
@@ -342,14 +356,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    min_requests, max_requests = resolve_request_bounds(args.mode, args.min_requests, args.max_requests)
+    min_requests, max_requests = resolve_request_bounds(args.mutual, args.min_requests, args.max_requests)
     if args.count <= 0:
         raise SystemExit("--count must be positive")
     if min_requests <= 0 or max_requests <= 0:
         raise SystemExit("request count bounds must be positive")
     if min_requests > max_requests:
         raise SystemExit("--min-requests cannot be greater than --max-requests")
-    if args.mode == MUTUAL_MODE:
+    if args.mutual:
         if min_requests > MUTUAL_MAX_REQUESTS:
             raise SystemExit(f"--min-requests cannot exceed {MUTUAL_MAX_REQUESTS} in mutual mode")
         if max_requests > MUTUAL_MAX_REQUESTS:
@@ -365,17 +379,19 @@ def main() -> None:
     next_person_id = 1
     for case_index in range(1, args.count + 1):
         request_count = rng.randint(min_requests, max_requests)
-        if args.mode == MUTUAL_MODE:
+        if args.mutual:
             requests = generate_mutual_case(case_index, rng, request_count, next_person_id)
         else:
             requests = generate_case(case_index, rng, request_count, next_person_id)
         next_person_id += request_count
         case_path = output_dir / f"{case_index}.in"
+        no_timestamp_case_path = output_dir / f"{case_index}.no.in"
         write_case(case_path, requests)
+        write_case_without_timestamp(no_timestamp_case_path, requests)
         load_case(case_path)
 
     print(f"generated {args.count} case(s) in {output_dir}")
-    print(f"mode = {args.mode}")
+    print(f"mode = {MUTUAL_MODE if args.mutual else DEFAULT_MODE}")
     print(f"seed = {args.seed}")
 
 

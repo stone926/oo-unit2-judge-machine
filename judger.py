@@ -111,6 +111,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="specific case stems to run, for example: --cases 1 3 5",
     )
+    parser.add_argument(
+        "--mutual",
+        action="store_true",
+        help="reserved for future mutual mode support",
+    )
     parser.add_argument("--rebuild", action="store_true", help="force rebuild project.jar before judging")
     return parser.parse_args()
 
@@ -654,7 +659,9 @@ def write_judge_failure_log(
 
 
 def select_cases(input_dir: Path, selected_stems: list[str] | None) -> list[Path]:
-    all_cases = sort_case_paths(list(input_dir.glob("*.in")))
+    all_cases = sort_case_paths(
+        [path for path in input_dir.glob("*.in") if not path.name.endswith(".no.in")]
+    )
     if selected_stems is None:
         return all_cases
     selected = set(selected_stems)
