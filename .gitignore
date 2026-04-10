@@ -2,6 +2,7 @@ in/
 out/
 judge/
 judge_case_*/
+.judge*
 *.jar
 __pycache__/
 .vscode/
