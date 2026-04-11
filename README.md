@@ -81,6 +81,31 @@ python test/data_generator.py
 python test/data_generator.py --count 20 --min-requests 10 --max-requests 40
 ```
 
+
+```bash
+python test/data_generator.py --count 20 --last-request-limit 80.0 --maint-ratio 0.30
+```
+
+指定时间与空间模式：
+
+```bash
+python test/data_generator.py --time-mode burst --pickup-mode clustered --dropoff-mode uniform
+```
+
+`data_generator.py` 新增参数说明：
+
+- `--last-request-limit`：默认模式中最后一条输入请求时间上限，默认 `80.0` 秒；互测模式固定 `50.0` 秒，不受该参数影响
+- `--maint-ratio`：每个测试点 MAINT 请求占比目标，默认 `0.30`
+- `--time-mode`：时间模式，`auto|uniform|burst`
+- `--pickup-mode`：上客楼层空间模式，`auto|clustered|uniform`
+- `--dropoff-mode`：下客楼层空间模式，`auto|clustered|uniform`
+
+模式组合规则：
+
+- `auto` 时按笛卡尔积轮转
+- 时间模式：`uniform`（均匀分布）和 `burst`（短时间高并发）
+- 空间模式：上客楼层 `clustered|uniform` 与下客楼层 `clustered|uniform` 自由组合
+
 互测模式：
 
 ```bash
