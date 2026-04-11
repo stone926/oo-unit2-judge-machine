@@ -7,6 +7,8 @@ import random
 
 from judge_common import (
     ELEVATOR_COUNT,
+    ALL_FLOORS,
+    MAINT_TARGET_FLOORS,
     InputRequest,
     MaintRequest,
     PersonRequest,
@@ -20,16 +22,25 @@ from judge_common import (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "in"
-ALL_FLOORS = ("B4", "B3", "B2", "B1", "F1", "F2", "F3", "F4", "F5", "F6", "F7")
-MAINT_TARGET_FLOORS = ("B2", "B1", "F2", "F3")
 DEFAULT_MODE = "default"
 MUTUAL_MODE = "mutual"
-DEFAULT_MIN_REQUESTS = 20
+DEFAULT_MIN_REQUESTS = 50
 DEFAULT_MAX_REQUESTS = 100
 MUTUAL_FIRST_TENTHS = 10
 MUTUAL_LAST_TENTHS = 500
 MUTUAL_MAX_REQUESTS = 70
 MAINT_GAP_TENTHS = 80
+DEFAULT_FIRST_TENTHS_MIN = 20
+DEFAULT_FIRST_TENTHS_MAX = 260
+DEFAULT_MAINT_EXTRA_TENTHS = 120
+DEFAULT_SPAN_PER_PERSON_MIN = 2
+DEFAULT_SPAN_PER_PERSON_MAX = 5
+DEFAULT_SPAN_BY_CASE_TYPE = (
+    (520, 900),
+    (360, 760),
+    (700, 1250),
+    (850, 1500),
+)
 
 
 def random_floor_pair(rng: random.Random) -> tuple[str, str]:
@@ -98,8 +109,42 @@ def generate_default_person_timestamps(
     return timestamps
 
 
-def clamp_mutual_tenths(tenths: int) -> int:
-    return max(MUTUAL_FIRST_TENTHS, min(MUTUAL_LAST_TENTHS, tenths))
+def fit_timestamps_to_window(
+    timestamps: list[int],
+    lower_tenths: int,
+    upper_tenths: int,
+    rng: random.Random,
+) -> list[int]:
+    if not timestamps:
+        return []
+    if lower_tenths > upper_tenths:
+        raise RuntimeError("invalid timestamp window")
+    if len(timestamps) == 1:
+        return [rng.randint(lower_tenths, upper_tenths)]
+
+    source_min = timestamps[0]
+    source_max = timestamps[-1]
+    if source_max == source_min:
+        return sorted(
+            rng.randint(lower_tenths, upper_tenths)
+            for _ in timestamps
+        )
+
+    source_span = source_max - source_min
+    target_span = upper_tenths - lower_tenths
+    projected = [
+        lower_tenths + round((tenths - source_min) * target_span / source_span)
+        for tenths in timestamps
+    ]
+
+    jittered = [
+        max(lower_tenths, min(upper_tenths, tenths + rng.randint(-2, 2)))
+        for tenths in projected
+    ]
+    jittered.sort()
+    jittered[0] = max(jittered[0], lower_tenths)
+    jittered[-1] = min(jittered[-1], upper_tenths)
+    return jittered
 
 
 def generate_mutual_person_timestamps(
@@ -107,55 +152,25 @@ def generate_mutual_person_timestamps(
     rng: random.Random,
     person_count: int,
 ) -> list[int]:
-    if person_count == 0:
-        return []
-    if person_count == 1:
-        return [rng.randint(MUTUAL_FIRST_TENTHS, MUTUAL_LAST_TENTHS)]
-
-    if case_type == 0:
-        return sorted(
-            rng.randint(MUTUAL_FIRST_TENTHS, MUTUAL_LAST_TENTHS)
-            for _ in range(person_count)
-        )
-
-    if case_type == 1:
-        center_count = min(person_count, rng.randint(3, 6))
-        centers = sorted(
-            rng.randint(MUTUAL_FIRST_TENTHS, MUTUAL_LAST_TENTHS)
-            for _ in range(center_count)
-        )
-        return sorted(
-            clamp_mutual_tenths(centers[offset % center_count] + rng.randint(-8, 8))
-            for offset in range(person_count)
-        )
-
-    if case_type == 2:
-        span = MUTUAL_LAST_TENTHS - MUTUAL_FIRST_TENTHS
-        return sorted(
-            clamp_mutual_tenths(
-                MUTUAL_FIRST_TENTHS
-                + round(span * offset / (person_count - 1))
-                + rng.randint(-3, 3)
-            )
-            for offset in range(person_count)
-        )
-
-    segment_count = min(person_count, rng.randint(3, 5))
-    segment_centers = []
-    for segment_index in range(segment_count):
-        left = (
-            MUTUAL_FIRST_TENTHS
-            + (MUTUAL_LAST_TENTHS - MUTUAL_FIRST_TENTHS) * segment_index // segment_count
-        )
-        right = (
-            MUTUAL_FIRST_TENTHS
-            + (MUTUAL_LAST_TENTHS - MUTUAL_FIRST_TENTHS) * (segment_index + 1) // segment_count
-        )
-        segment_centers.append(rng.randint(left, max(left, right)))
-    return sorted(
-        clamp_mutual_tenths(segment_centers[offset % segment_count] + rng.randint(-5, 5))
-        for offset in range(person_count)
+    baseline = generate_default_person_timestamps(case_type, rng, person_count)
+    return fit_timestamps_to_window(
+        timestamps=baseline,
+        lower_tenths=MUTUAL_FIRST_TENTHS,
+        upper_tenths=MUTUAL_LAST_TENTHS,
+        rng=rng,
     )
+
+
+def resolve_default_time_window(
+    case_type: int,
+    rng: random.Random,
+    person_count: int,
+) -> tuple[int, int]:
+    first_tenths = rng.randint(DEFAULT_FIRST_TENTHS_MIN, DEFAULT_FIRST_TENTHS_MAX)
+    span_min, span_max = DEFAULT_SPAN_BY_CASE_TYPE[case_type % len(DEFAULT_SPAN_BY_CASE_TYPE)]
+    span = rng.randint(span_min, span_max)
+    span += person_count * rng.randint(DEFAULT_SPAN_PER_PERSON_MIN, DEFAULT_SPAN_PER_PERSON_MAX)
+    return first_tenths, first_tenths + span
 
 
 def choose_maint_count(
@@ -164,15 +179,24 @@ def choose_maint_count(
     request_count: int,
     mutual: bool,
 ) -> int:
-    if request_count <= 1 or case_type == 0:
+    if request_count <= 1:
         return 0
-    hard_cap = 4 if mutual else 8
-    limit = min(hard_cap, max(1, request_count // 6))
+
+    # Mutual mode allows at most one MAINT per elevator.
+    hard_cap = ELEVATOR_COUNT if mutual else 12
+    limit = min(hard_cap, max(1, request_count // 4))
+
+    if case_type == 0:
+        return rng.randint(1, min(3, limit))
     if case_type == 1:
-        return 1
+        lower = 2 if limit >= 2 else 1
+        return rng.randint(lower, min(4, limit))
     if case_type == 2:
-        return rng.randint(1, min(2, limit))
-    return rng.randint(1, limit)
+        lower = 2 if limit >= 2 else 1
+        return rng.randint(lower, min(5, limit))
+
+    lower = max(2, limit // 2)
+    return rng.randint(min(lower, limit), limit)
 
 
 def build_maint_elevator_plan(
@@ -183,25 +207,42 @@ def build_maint_elevator_plan(
 ) -> list[int]:
     if maint_count == 0:
         return []
-    if mutual:
-        if maint_count > ELEVATOR_COUNT:
-            raise RuntimeError("mutual mode cannot assign maintenance to more than 6 elevators")
-        return rng.sample(list(range(1, ELEVATOR_COUNT + 1)), k=maint_count)
+
+    base_plan: list[int]
     if case_type == 1:
-        return [rng.randint(1, ELEVATOR_COUNT) for _ in range(maint_count)]
-    if case_type == 2:
-        plan = rng.sample(list(range(1, ELEVATOR_COUNT + 1)), k=min(maint_count, ELEVATOR_COUNT))
-        while len(plan) < maint_count:
-            plan.append(rng.randint(1, ELEVATOR_COUNT))
-        return plan
-    repeated = rng.randint(1, ELEVATOR_COUNT)
-    plan = [repeated]
-    while len(plan) < maint_count:
-        if rng.random() < 0.6:
-            plan.append(repeated)
+        base_plan = [rng.randint(1, ELEVATOR_COUNT) for _ in range(maint_count)]
+    elif case_type == 2:
+        base_plan = rng.sample(list(range(1, ELEVATOR_COUNT + 1)), k=min(maint_count, ELEVATOR_COUNT))
+        while len(base_plan) < maint_count:
+            base_plan.append(rng.randint(1, ELEVATOR_COUNT))
+    else:
+        repeated = rng.randint(1, ELEVATOR_COUNT)
+        base_plan = [repeated]
+        while len(base_plan) < maint_count:
+            if rng.random() < 0.6:
+                base_plan.append(repeated)
+            else:
+                base_plan.append(rng.randint(1, ELEVATOR_COUNT))
+
+    if not mutual:
+        return base_plan
+
+    assigned: list[int] = []
+    used: set[int] = set()
+    for preferred in base_plan:
+        if preferred not in used:
+            selected = preferred
         else:
-            plan.append(rng.randint(1, ELEVATOR_COUNT))
-    return plan
+            candidates = [elevator_id for elevator_id in range(1, ELEVATOR_COUNT + 1) if elevator_id not in used]
+            if not candidates:
+                raise RuntimeError("mutual mode cannot assign maintenance to more than 6 elevators")
+            selected = min(
+                candidates,
+                key=lambda elevator_id: (abs(elevator_id - preferred), elevator_id),
+            )
+        used.add(selected)
+        assigned.append(selected)
+    return assigned
 
 
 def nearest_maint_slot(slots: list[int], preferred_tenths: int) -> int:
@@ -311,10 +352,15 @@ def generate_case(
         lower_tenths = MUTUAL_FIRST_TENTHS
         upper_tenths = MUTUAL_LAST_TENTHS
     else:
-        person_timestamps = generate_default_person_timestamps(case_type, rng, person_count)
-        lower_tenths = 0
-        person_upper = person_timestamps[-1] if person_timestamps else 0
-        upper_tenths = max(person_upper + 120, 120)
+        baseline_person_timestamps = generate_default_person_timestamps(case_type, rng, person_count)
+        lower_tenths, person_upper_tenths = resolve_default_time_window(case_type, rng, person_count)
+        person_timestamps = fit_timestamps_to_window(
+            timestamps=baseline_person_timestamps,
+            lower_tenths=lower_tenths,
+            upper_tenths=person_upper_tenths,
+            rng=rng,
+        )
+        upper_tenths = person_upper_tenths + DEFAULT_MAINT_EXTRA_TENTHS
 
     requests: list[InputRequest] = []
     next_request_id = start_request_id

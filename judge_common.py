@@ -5,8 +5,8 @@ from decimal import Decimal
 from pathlib import Path
 import re
 
-FLOOR_NAMES = ("B4", "B3", "B2", "B1", "F1", "F2", "F3", "F4", "F5", "F6", "F7")
-FLOOR_TO_INDEX = {name: index for index, name in enumerate(FLOOR_NAMES)}
+ALL_FLOORS = ("B4", "B3", "B2", "B1", "F1", "F2", "F3", "F4", "F5", "F6", "F7")
+FLOOR_TO_INDEX = {name: index for index, name in enumerate(ALL_FLOORS)}
 INITIAL_FLOOR = "F1"
 ELEVATOR_COUNT = 6
 CAPACITY = 400
