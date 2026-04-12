@@ -153,8 +153,8 @@ def load_case(path: Path) -> list[InputRequest]:
             seen_ids.add(unique_id)
             requests.append(request)
 
-    if not 1 <= len(requests) <= 100:
-        raise CaseFormatError(f"{path}: request count must be in [1, 100]")
+    # if not 1 <= len(requests) <= 100:
+    #     raise CaseFormatError(f"{path}: request count must be in [1, 100]")
     return requests
 
 

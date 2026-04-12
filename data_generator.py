@@ -34,7 +34,7 @@ MUTUAL_LAST_TENTHS = 500
 MUTUAL_MAX_REQUESTS = 70
 MAINT_GAP_TENTHS = 80
 DEFAULT_MAINT_RATIO = 0.30
-DEFAULT_FIRST_TENTHS_MIN = 20
+DEFAULT_FIRST_TENTHS_MIN = 0
 DEFAULT_FIRST_TENTHS_MAX = 260
 DEFAULT_MIN_WINDOW_TENTHS = 180
 MAINT_CLUSTER_JITTER_TENTHS = 12
@@ -675,8 +675,8 @@ def main() -> None:
         raise SystemExit("--min-requests cannot be greater than --max-requests")
     if args.mutual and max_requests > MUTUAL_MAX_REQUESTS:
         raise SystemExit(f"--max-requests cannot exceed {MUTUAL_MAX_REQUESTS} in mutual mode")
-    if not args.mutual and max_requests > DEFAULT_MAX_REQUESTS:
-        raise SystemExit(f"--max-requests cannot exceed {DEFAULT_MAX_REQUESTS}")
+    # if not args.mutual and max_requests > DEFAULT_MAX_REQUESTS:
+    #     raise SystemExit(f"--max-requests cannot exceed {DEFAULT_MAX_REQUESTS}")
     if not args.mutual and default_last_limit_tenths < 10:
         raise SystemExit("--last-request-limit must be at least 1.0 in default mode")
 
