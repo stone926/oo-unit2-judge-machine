@@ -15,6 +15,7 @@ INPUT_DIR = SCRIPT_DIR / "in"
 OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
+MAINT_MARGIN_GENERATOR = SCRIPT_DIR / "maint_margin_stress_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
 
 
@@ -23,6 +24,7 @@ class RunArgs:
     once: bool
     mutual: bool
     sleep_seconds: float
+    generator: str
     generator_args: list[str]
     judger_args: list[str]
 
@@ -55,7 +57,7 @@ def split_passthrough_args(raw_args: list[str]) -> tuple[list[str], list[str], l
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Loop data_generator.py + judger.py until interrupted.",
+        description="Loop generator + judger.py until interrupted.",
         epilog=(
             "run.py options should appear before passthrough sections.\n"
             "Arguments after --generator-args are forwarded to data_generator.py.\n"
@@ -83,6 +85,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="sleep between rounds",
     )
+    parser.add_argument(
+        "--generator",
+        choices=["default", "maint-margin"],
+        default="default",
+        help=(
+            "select the data generator script: default uses data_generator.py, "
+            "maint-margin uses maint_margin_stress_generator.py"
+        ),
+    )
     return parser
 
 
@@ -95,6 +106,7 @@ def parse_args(raw_args: list[str] | None = None) -> RunArgs:
         once=namespace.once,
         mutual=namespace.mutual,
         sleep_seconds=namespace.sleep_seconds,
+        generator=namespace.generator,
         generator_args=generator_args,
         judger_args=judger_args,
     )
@@ -187,14 +199,15 @@ def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | Non
 
 def main() -> None:
     args = parse_args()
+    generator_script = DATA_GENERATOR if args.generator == "default" else MAINT_MARGIN_GENERATOR
     generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
     judger_args = append_flag_once(args.judger_args, "--mutual", args.mutual)
     runtime_paths = resolve_runtime_paths(generator_args, judger_args)
     round_index = 1
     python = sys.executable
 
-    if not DATA_GENERATOR.exists():
-        raise SystemExit(f"data generator does not exist: {DATA_GENERATOR}")
+    if not generator_script.exists():
+        raise SystemExit(f"data generator does not exist: {generator_script}")
     if not JUDGER.exists():
         raise SystemExit(f"judger does not exist: {JUDGER}")
     if runtime_paths.generator_output_dir != runtime_paths.judger_input_dir:
@@ -223,8 +236,8 @@ def main() -> None:
                 )
 
             generator_code = run_command(
-                [python, str(DATA_GENERATOR), *generator_args],
-                "data_generator",
+                [python, str(generator_script), *generator_args],
+                generator_script.stem,
             )
             judger_code: int | None = None
             if generator_code == 0:
@@ -234,7 +247,7 @@ def main() -> None:
                 )
             else:
                 print(
-                    f"[{now_text()}] skip judger because data_generator failed",
+                    f"[{now_text()}] skip judger because generator failed",
                     flush=True,
                 )
 

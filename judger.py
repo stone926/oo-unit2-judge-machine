@@ -184,10 +184,33 @@ def build_project_jar(project_jar: Path, source_dir: Path, lib_jar: Path, main_c
             ["javac", "-encoding", "UTF-8", "-cp", str(lib_jar), "-d", str(classes_dir), *java_files],
             REPO_ROOT,
         )
-        run_command(
-            ["jar", "--create", "--file", str(project_jar), "--manifest", str(manifest_path), "-C", str(classes_dir), "."],
-            REPO_ROOT,
-        )
+        new_style_jar_command = [
+            "jar",
+            "--create",
+            "--file",
+            str(project_jar),
+            "--manifest",
+            str(manifest_path),
+            "-C",
+            str(classes_dir),
+            ".",
+        ]
+        legacy_jar_command = ["jar", "cfm", str(project_jar), str(manifest_path), "-C", str(classes_dir), "."]
+
+        # Prefer modern jar options, but fall back to Java 8-compatible syntax when needed.
+        try:
+            run_command(new_style_jar_command, REPO_ROOT)
+        except RuntimeError as new_style_error:
+            try:
+                run_command(legacy_jar_command, REPO_ROOT)
+            except RuntimeError as legacy_error:
+                raise RuntimeError(
+                    "failed to package project jar with both modern and legacy jar syntaxes\n"
+                    f"modern command: {' '.join(new_style_jar_command)}\n"
+                    f"legacy command: {' '.join(legacy_jar_command)}\n"
+                    f"modern error:\n{new_style_error}\n"
+                    f"legacy error:\n{legacy_error}"
+                ) from legacy_error
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
