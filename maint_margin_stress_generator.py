@@ -21,7 +21,7 @@ from judge_common import (
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "in_maint_margin_stress"
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "in"
 
 MUTUAL_FIRST_TENTHS = 10
 MUTUAL_LAST_TENTHS = 500
