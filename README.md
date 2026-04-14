@@ -54,10 +54,21 @@ python test/run.py --once --mutual --sleep-seconds 1.5
 - 通过 `--generator-args --output-dir` 和 `--judger-args --input-dir` 自定义测试数据目录，建议指向同一目录
 - `run.py` 不再默认追加 `--rebuild`；如果需要每轮强制重新打包，请显式传入
 
+`run.py` 新增了 `--generator` 选项，可切换生成器脚本：
+
+- `--generator default`：使用 `data_generator.py`（默认）
+- `--generator maint-margin`：使用 `maint_margin_stress_generator.py`（用于 MAINT 安全余量压测）
+
 透传参数示例：
 
 ```bash
 python test/run.py --once --generator-args --count 20 --min-requests 10 --max-requests 40 --judger-args --rebuild --cases 1 2 3
+```
+
+使用 MAINT 安全余量压测生成器：
+
+```bash
+python test/run.py --once --generator maint-margin --generator-args --count 20 --double-wave --judger-args --rebuild
 ```
 
 自定义目录示例：
