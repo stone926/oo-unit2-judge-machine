@@ -8,13 +8,18 @@ import re
 ALL_FLOORS = ("B4", "B3", "B2", "B1", "F1", "F2", "F3", "F4", "F5", "F6", "F7")
 FLOOR_TO_INDEX = {name: index for index, name in enumerate(ALL_FLOORS)}
 INITIAL_FLOOR = "F1"
+TRANSFER_FLOOR = "F2"
+UPDATE_FLOOR = "F3"
 ELEVATOR_COUNT = 6
+CAR_COUNT = 12
 CAPACITY = 400
 MOVE_TIME = Decimal("0.4")
 TEST_MOVE_TIME = Decimal("0.2")
 DOOR_TIME = Decimal("0.4")
-REPAIR_TIME = Decimal("1.0")
+SPECIAL_WAIT_TIME = Decimal("1.0")
 MAINT_COMPLETE_LIMIT = Decimal("7.0")
+UPDATE_COMPLETE_LIMIT = Decimal("6.0")
+RECYCLE_COMPLETE_LIMIT = Decimal("6.0")
 TIMESTAMP_EPS = Decimal("0.000001")
 MAINT_TARGET_FLOORS = ("B2", "B1", "F2", "F3")
 
@@ -24,6 +29,8 @@ PERSON_INPUT_LINE_RE = re.compile(
 MAINT_INPUT_LINE_RE = re.compile(
     r"^\[(\d+\.\d)\]MAINT-([1-6])-(\d+)-(B[12]|F[23])$"
 )
+UPDATE_INPUT_LINE_RE = re.compile(r"^\[(\d+\.\d)\]UPDATE-([1-6])$")
+RECYCLE_INPUT_LINE_RE = re.compile(r"^\[(\d+\.\d)\]RECYCLE-([7-9]|1[0-2])$")
 OUTPUT_LINE_RE = re.compile(r"^\[\s*(\d+(?:\.\d+)?)\](.+)$")
 
 
@@ -48,7 +55,19 @@ class MaintRequest:
     target_floor: str
 
 
-InputRequest = PersonRequest | MaintRequest
+@dataclass(frozen=True, slots=True)
+class UpdateRequest:
+    timestamp: Decimal
+    elevator_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class RecycleRequest:
+    timestamp: Decimal
+    elevator_id: int
+
+
+InputRequest = PersonRequest | MaintRequest | UpdateRequest | RecycleRequest
 
 
 def floor_to_index(name: str) -> int:
@@ -56,12 +75,6 @@ def floor_to_index(name: str) -> int:
     if index is None:
         raise CaseFormatError(f"unknown floor: {name}")
     return index
-
-
-def request_unique_id(request: InputRequest) -> int:
-    if isinstance(request, PersonRequest):
-        return request.person_id
-    return request.worker_id
 
 
 def validate_person_request(request: PersonRequest) -> None:
@@ -90,6 +103,16 @@ def validate_maint_request(request: MaintRequest) -> None:
         )
 
 
+def validate_update_request(request: UpdateRequest) -> None:
+    if not 1 <= request.elevator_id <= ELEVATOR_COUNT:
+        raise CaseFormatError(f"update request elevator id {request.elevator_id} is invalid")
+
+
+def validate_recycle_request(request: RecycleRequest) -> None:
+    if not 7 <= request.elevator_id <= CAR_COUNT:
+        raise CaseFormatError(f"recycle request elevator id {request.elevator_id} is invalid")
+
+
 def parse_input_line(raw_line: str, path: Path, line_number: int) -> InputRequest:
     line = raw_line.strip()
     person_match = PERSON_INPUT_LINE_RE.fullmatch(line)
@@ -115,6 +138,24 @@ def parse_input_line(raw_line: str, path: Path, line_number: int) -> InputReques
         validate_maint_request(request)
         return request
 
+    update_match = UPDATE_INPUT_LINE_RE.fullmatch(line)
+    if update_match is not None:
+        request = UpdateRequest(
+            timestamp=Decimal(update_match.group(1)),
+            elevator_id=int(update_match.group(2)),
+        )
+        validate_update_request(request)
+        return request
+
+    recycle_match = RECYCLE_INPUT_LINE_RE.fullmatch(line)
+    if recycle_match is not None:
+        request = RecycleRequest(
+            timestamp=Decimal(recycle_match.group(1)),
+            elevator_id=int(recycle_match.group(2)),
+        )
+        validate_recycle_request(request)
+        return request
+
     raise CaseFormatError(
         f"{path}:{line_number}: invalid input line format: {raw_line.rstrip()}"
     )
@@ -122,27 +163,25 @@ def parse_input_line(raw_line: str, path: Path, line_number: int) -> InputReques
 
 def load_case(path: Path) -> list[InputRequest]:
     requests: list[InputRequest] = []
-    seen_ids: set[int] = set()
+    seen_person_ids: set[int] = set()
+    seen_worker_ids: set[int] = set()
     maint_timestamps_by_elevator = {elevator_id: [] for elevator_id in range(1, ELEVATOR_COUNT + 1)}
 
     with path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\r\n")
             if line == "":
-                raise CaseFormatError(
-                    f"{path}:{line_number}: blank lines are not allowed in input"
-                )
+                raise CaseFormatError(f"{path}:{line_number}: blank lines are not allowed in input")
             request = parse_input_line(line, path, line_number)
-            unique_id = request_unique_id(request)
-            if unique_id in seen_ids:
-                raise CaseFormatError(
-                    f"{path}:{line_number}: duplicated request id {unique_id}"
-                )
             if requests and request.timestamp < requests[-1].timestamp:
-                raise CaseFormatError(
-                    f"{path}:{line_number}: input timestamps must be nondecreasing"
-                )
-            if isinstance(request, MaintRequest):
+                raise CaseFormatError(f"{path}:{line_number}: input timestamps must be nondecreasing")
+            if isinstance(request, PersonRequest):
+                if request.person_id in seen_person_ids or request.person_id in seen_worker_ids:
+                    raise CaseFormatError(f"{path}:{line_number}: duplicated request id {request.person_id}")
+                seen_person_ids.add(request.person_id)
+            elif isinstance(request, MaintRequest):
+                if request.worker_id in seen_person_ids or request.worker_id in seen_worker_ids:
+                    raise CaseFormatError(f"{path}:{line_number}: duplicated request id {request.worker_id}")
                 last_timestamps = maint_timestamps_by_elevator[request.elevator_id]
                 if last_timestamps and request.timestamp - last_timestamps[-1] < Decimal("8.0"):
                     raise CaseFormatError(
@@ -150,11 +189,8 @@ def load_case(path: Path) -> list[InputRequest]:
                         f"{request.elevator_id} must be at least 8.0s apart"
                     )
                 last_timestamps.append(request.timestamp)
-            seen_ids.add(unique_id)
+                seen_worker_ids.add(request.worker_id)
             requests.append(request)
-
-    # if not 1 <= len(requests) <= 100:
-    #     raise CaseFormatError(f"{path}: request count must be in [1, 100]")
     return requests
 
 
@@ -180,11 +216,12 @@ def request_to_line(request: InputRequest, with_timestamp: bool) -> str:
             f"{request.person_id}-WEI-{request.weight}-FROM-"
             f"{request.from_floor}-TO-{request.to_floor}"
         )
+    elif isinstance(request, MaintRequest):
+        payload = f"MAINT-{request.elevator_id}-{request.worker_id}-{request.target_floor}"
+    elif isinstance(request, UpdateRequest):
+        payload = f"UPDATE-{request.elevator_id}"
     else:
-        payload = (
-            f"MAINT-{request.elevator_id}-{request.worker_id}-"
-            f"{request.target_floor}"
-        )
+        payload = f"RECYCLE-{request.elevator_id}"
     if not with_timestamp:
         return payload
     return f"[{request.timestamp}]{payload}"
