@@ -4,11 +4,15 @@
 
 ## 使用方式
 
+```bash
+python run.py --judger-args --main-class YourMainClass
+```
+
 ### 输入输出
 
 依赖数据投喂程序和官方输入输出 `jar` 包，默认寻找路径：
 - 数据投喂：`dependency/datainput`
-- 输入输出：项目根目录下的 `elevator3-2026.jar`
+- 输入输出：`dependency/elevator3-2026.jar`
 
 通过 `judger` 的参数 `--datainput` 和 `--lib-jar` 修改依赖路径，若以 `run.py` 启动，需要通过 `--judger-args` 透传：
 ```bash
@@ -21,7 +25,7 @@ python run.py --judger-args --datainput in.exe --lib-jar lib.jar
 ```bash
 python run.py --mutual --judger-args --main-class MainClass
 ```
-其中 `--mutual` 为互测模式，使 `data-generator` 生成的数据都符合互测限制，使 `judger` 的校验都依照互测标准（主要是时间限制）
+其中 `--mutual` 为互测模式，使 `data-generator` 生成的数据都符合互测限制，使 `judger` 的校验都依照互测标准
 
 打包后的项目 `jar` 包默认为同目录下的 `project.jar`。通过 `judger` 的参数 `--project-jar` 修改：
 ```bash
@@ -52,7 +56,7 @@ python test/run.py --once --mutual --sleep-seconds 1.5
 - `--judger-args` 后面的参数会原样传给 `judger.py`
 - `run.py` 自身的参数需要放在这两个透传段之前
 - 通过 `--generator-args --output-dir` 和 `--judger-args --input-dir` 自定义测试数据目录，建议指向同一目录
-- `run.py` 不再默认追加 `--rebuild`；如果需要每轮强制重新打包，请显式传入
+- `run.py` 默认不追加 `--rebuild`；如果需要每轮强制重新打包，请显式传入
 
 `run.py` 新增了 `--generator` 选项，可切换生成器脚本：
 
