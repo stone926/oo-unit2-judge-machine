@@ -8,7 +8,7 @@
 
 依赖数据投喂程序和官方输入输出 `jar` 包，默认寻找路径：
 - 数据投喂：`dependency/datainput`
-- 输入输出：项目根目录下的 `elevator3-2026.jar`
+- 输入输出：`dependency/elevator3-2026.jar`
 
 通过 `judger` 的参数 `--datainput` 和 `--lib-jar` 修改依赖路径，若以 `run.py` 启动，需要通过 `--judger-args` 透传：
 ```bash
