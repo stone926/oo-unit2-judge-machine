@@ -1,4 +1,4 @@
-# OO Unit2 测评机（hw6）
+# OO Unit2 测评机（hw7）
 
 全部由 `Codex GPT-5.4 xhigh` 编写
 
@@ -8,7 +8,7 @@
 
 依赖数据投喂程序和官方输入输出 `jar` 包，默认寻找路径：
 - 数据投喂：`dependency/datainput`
-- 输入输出：`dependency/elevator2-2026.jar`
+- 输入输出：项目根目录下的 `elevator3-2026.jar`
 
 通过 `judger` 的参数 `--datainput` 和 `--lib-jar` 修改依赖路径，若以 `run.py` 启动，需要通过 `--judger-args` 透传：
 ```bash
@@ -57,7 +57,7 @@ python test/run.py --once --mutual --sleep-seconds 1.5
 `run.py` 新增了 `--generator` 选项，可切换生成器脚本：
 
 - `--generator default`：使用 `data_generator.py`（默认）
-- `--generator maint-margin`：使用 `maint_margin_stress_generator.py`（用于 MAINT 安全余量压测）
+- `--generator maint-margin`：使用 `maint_margin_stress_generator.py`（用于 MAINT/UPDATE/RECYCLE 压测）
 
 透传参数示例：
 
@@ -141,7 +141,7 @@ python test/data_generator.py --mutual --count 10 --min-requests 30 --max-reques
 python test/judger.py
 ```
 
-`judger.py` 默认单个测试点超时为 `120s`，互测模式 `--mutual` 下默认变为 `180s`；如果显式传入 `--timeout-seconds`，则以显式值为准。
+`judger.py` 默认单个测试点超时为 `120s`；如果显式传入 `--timeout-seconds`，则以显式值为准。
 
 强制重新打包并只测指定测试点：
 ```bash
