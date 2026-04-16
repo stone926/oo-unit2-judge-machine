@@ -389,6 +389,12 @@ def validate_output(case_path: Path, output_path: Path) -> None:
                         passenger = passengers.get(person_id)
                         if passenger is None or passenger.completed or passenger.onboard:
                             raise JudgeFailure(f"invalid RECEIVE for passenger {person_id}", line_number, line)
+                        if less_than(timestamp, passenger.request_time):
+                            raise JudgeFailure(
+                                f"passenger {person_id} request has not arrived yet",
+                                line_number,
+                                line,
+                            )
                         if passenger.active_receive_elevator is not None:
                             raise JudgeFailure(f"passenger {person_id} still has an unfinished RECEIVE", line_number, line)
                         if not can_receive_now(shaft, car_id):
@@ -402,6 +408,12 @@ def validate_output(case_path: Path, output_path: Path) -> None:
                         floor_name = event.group(1)
                         if car.door_open:
                             raise JudgeFailure(f"elevator {car_id} cannot ARRIVE with open door", line_number, line)
+                        if car.next_arrive_not_before is None:
+                            raise JudgeFailure(
+                                f"elevator {car_id} cannot ARRIVE without movement permission",
+                                line_number,
+                                line,
+                            )
                         if car.next_arrive_not_before is not None and less_than(timestamp, car.next_arrive_not_before):
                             raise JudgeFailure(f"elevator {car_id} moves too fast", line_number, line)
                         if abs(floor_to_index(floor_name) - floor_to_index(car.current_floor)) != 1:
@@ -615,7 +627,11 @@ def validate_output(case_path: Path, output_path: Path) -> None:
                         raise JudgeFailure(f"sub elevator {elevator_id} is not reset at RECYCLE-END", line_number, line)
                     shaft.mode = MODE_NORMAL
                     shaft.recycle = None
-                    refresh_next_arrive_window(cars[shaft.shaft_id], shaft, timestamp)
+                    # Keep an already running main-car movement window unchanged.
+                    # Recompute only when there is no in-progress active-receive movement.
+                    main_car = cars[shaft.shaft_id]
+                    if not (main_car.active_receives and main_car.next_arrive_not_before is not None):
+                        refresh_next_arrive_window(main_car, shaft, timestamp)
                     break
             else:
                 raise JudgeFailure("unknown output action", line_number, line)
