@@ -15,7 +15,6 @@ INPUT_DIR = SCRIPT_DIR / "in"
 OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
-STRESS_GENERATOR = SCRIPT_DIR / "stress_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
 
 
@@ -24,7 +23,6 @@ class RunArgs:
     once: bool
     mutual: bool
     sleep_seconds: float
-    generator: str
     generator_args: list[str]
     judger_args: list[str]
 
@@ -85,15 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="sleep between rounds",
     )
-    parser.add_argument(
-        "--generator",
-        choices=["default", "stress"],
-        default="default",
-        help=(
-            "select the data generator script: default uses data_generator.py, "
-            "maint-margin uses maint_margin_stress_generator.py"
-        ),
-    )
     return parser
 
 
@@ -106,7 +95,6 @@ def parse_args(raw_args: list[str] | None = None) -> RunArgs:
         once=namespace.once,
         mutual=namespace.mutual,
         sleep_seconds=namespace.sleep_seconds,
-        generator=namespace.generator,
         generator_args=generator_args,
         judger_args=judger_args,
     )
@@ -199,7 +187,7 @@ def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | Non
 
 def main() -> None:
     args = parse_args()
-    generator_script = DATA_GENERATOR if args.generator == "default" else STRESS_GENERATOR
+    generator_script = DATA_GENERATOR
     generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
     judger_args = append_flag_once(args.judger_args, "--mutual", args.mutual)
     runtime_paths = resolve_runtime_paths(generator_args, judger_args)
