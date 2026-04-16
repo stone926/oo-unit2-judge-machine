@@ -43,7 +43,7 @@ DEFAULT_PROJECT_JAR = SCRIPT_DIR / "project.jar"
 DEFAULT_SOURCE_DIR = REPO_ROOT / "src"
 DEFAULT_LIB_JAR = SCRIPT_DIR / "dependency" / "elevator3-2026.jar"
 DEFAULT_DATAINPUT_EXE = SCRIPT_DIR / "dependency" / "datainput"
-DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_TIMEOUT = 120
 
 ID12 = r"([1-9]|1[0-2])"
 RECEIVE_RE = re.compile(rf"^RECEIVE-(\d+)-{ID12}$")
@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR)
     parser.add_argument("--datainput", type=Path, default=DEFAULT_DATAINPUT_EXE)
     parser.add_argument("--main-class", default="oo.Main")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--cases", nargs="*", default=None)
     parser.add_argument("--mutual", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
@@ -635,7 +635,7 @@ def validate_output(case_path: Path, output_path: Path) -> None:
         raise JudgeFailure(f"unfinished passengers at program end: {unfinished}")
 
 
-def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path, lib_jar: Path, datainput_exe: Path, timeout_seconds: int) -> tuple[str, str]:
+def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path, lib_jar: Path, datainput_exe: Path, timeout: int) -> tuple[str, str]:
     ensure_directory(out_path.parent)
     ensure_directory(err_path.parent)
     if out_path.exists():
@@ -665,7 +665,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
         )
         if feeder.stdout is not None:
             feeder.stdout.close()
-        stdout_text, stderr_text = java.communicate(timeout=timeout_seconds)
+        stdout_text, stderr_text = java.communicate(timeout=timeout)
         feeder_stderr = ""
         if feeder.stderr is not None:
             feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
@@ -733,7 +733,7 @@ def main() -> None:
         err_path = output_dir / f"{case_path.stem}.err.out"
         log_path = log_dir / f"{case_path.stem}.log"
         try:
-            _, combined_stderr = run_case(case_path, out_path, err_path, project_jar, lib_jar, datainput_exe, args.timeout_seconds)
+            _, combined_stderr = run_case(case_path, out_path, err_path, project_jar, lib_jar, datainput_exe, args.timeout)
             if combined_stderr.strip():
                 message = "stderr is not empty, skipped semantic judging"
                 write_failure_log(log_path, case_path, out_path, err_path, message)
