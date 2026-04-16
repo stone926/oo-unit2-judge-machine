@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR)
     parser.add_argument("--datainput", type=Path, default=DEFAULT_DATAINPUT_EXE)
     parser.add_argument("--main-class", default="oo.Main")
-    parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--cases", nargs="*", default=None)
     parser.add_argument("--mutual", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
