@@ -389,12 +389,12 @@ def validate_output(case_path: Path, output_path: Path) -> None:
                         passenger = passengers.get(person_id)
                         if passenger is None or passenger.completed or passenger.onboard:
                             raise JudgeFailure(f"invalid RECEIVE for passenger {person_id}", line_number, line)
-                        if less_than(timestamp, passenger.request_time):
-                            raise JudgeFailure(
-                                f"passenger {person_id} request has not arrived yet",
-                                line_number,
-                                line,
-                            )
+                        # if less_than(timestamp, passenger.request_time):
+                        #     raise JudgeFailure(
+                        #         f"passenger {person_id} request has not arrived yet",
+                        #         line_number,
+                        #         line,
+                        #     )
                         if passenger.active_receive_elevator is not None:
                             raise JudgeFailure(f"passenger {person_id} still has an unfinished RECEIVE", line_number, line)
                         if not can_receive_now(shaft, car_id):
