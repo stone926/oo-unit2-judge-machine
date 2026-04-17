@@ -24,6 +24,7 @@ from judge_common import (
     TRANSFER_FLOOR,
     UPDATE_COMPLETE_LIMIT,
     UPDATE_FLOOR,
+    InputRequest,
     MaintRequest,
     PersonRequest,
     RecycleRequest,
@@ -44,6 +45,10 @@ DEFAULT_SOURCE_DIR = REPO_ROOT / "src"
 DEFAULT_LIB_JAR = SCRIPT_DIR / "dependency" / "elevator3-2026.jar"
 DEFAULT_DATAINPUT_EXE = SCRIPT_DIR / "dependency" / "datainput"
 DEFAULT_TIMEOUT = 120
+MUTUAL_TIMEOUT = 180
+MUTUAL_FIRST_REQUEST_TIME = Decimal("1.0")
+MUTUAL_LAST_REQUEST_TIME = Decimal("50.0")
+MUTUAL_MAX_REQUESTS = 70
 
 ID12 = r"([1-9]|1[0-2])"
 RECEIVE_RE = re.compile(rf"^RECEIVE-(\d+)-{ID12}$")
@@ -156,11 +161,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR)
     parser.add_argument("--datainput", type=Path, default=DEFAULT_DATAINPUT_EXE)
     parser.add_argument("--main-class", default="oo.Main")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--timeout", type=int, default=None)
     parser.add_argument("--cases", nargs="*", default=None)
     parser.add_argument("--mutual", action="store_true")
     parser.add_argument("--rebuild", action="store_true")
     return parser.parse_args()
+
+
+def validate_mutual_input_case(requests: list[InputRequest]) -> None:
+    if not requests:
+        raise JudgeFailure("mutual mode requires at least one input request")
+    if requests[0].timestamp < MUTUAL_FIRST_REQUEST_TIME:
+        raise JudgeFailure("mutual mode requires the first input request timestamp >= 1.0s")
+    if requests[-1].timestamp > MUTUAL_LAST_REQUEST_TIME:
+        raise JudgeFailure("mutual mode requires the last input request timestamp <= 50.0s")
+    if len(requests) > MUTUAL_MAX_REQUESTS:
+        raise JudgeFailure(f"mutual mode requires total input requests <= {MUTUAL_MAX_REQUESTS}")
+
+    maint_count_by_elevator = {elevator_id: 0 for elevator_id in range(1, ELEVATOR_COUNT + 1)}
+    for request in requests:
+        if isinstance(request, MaintRequest):
+            maint_count_by_elevator[request.elevator_id] += 1
+            if maint_count_by_elevator[request.elevator_id] > 1:
+                raise JudgeFailure(
+                    f"mutual mode requires each elevator to have at most one MAINT request (elevator {request.elevator_id})"
+                )
 
 
 def run_command(command: list[str], cwd: Path) -> None:
@@ -743,13 +768,16 @@ def main() -> None:
     clean_matching_files(log_dir, "*.log")
     if args.rebuild or not project_jar.exists():
         build_project_jar(project_jar, source_dir, lib_jar, args.main_class)
+    judge_timeout = args.timeout if args.timeout is not None else (MUTUAL_TIMEOUT if args.mutual else DEFAULT_TIMEOUT)
     results: list[CaseResult] = []
     for case_path in select_cases(input_dir, args.cases):
         out_path = output_dir / f"{case_path.stem}.out"
         err_path = output_dir / f"{case_path.stem}.err.out"
         log_path = log_dir / f"{case_path.stem}.log"
         try:
-            _, combined_stderr = run_case(case_path, out_path, err_path, project_jar, lib_jar, datainput_exe, args.timeout)
+            if args.mutual:
+                validate_mutual_input_case(load_case(case_path))
+            _, combined_stderr = run_case(case_path, out_path, err_path, project_jar, lib_jar, datainput_exe, judge_timeout)
             if combined_stderr.strip():
                 message = "stderr is not empty, skipped semantic judging"
                 write_failure_log(log_path, case_path, out_path, err_path, message)

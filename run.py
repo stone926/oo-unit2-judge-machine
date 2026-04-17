@@ -16,6 +16,7 @@ OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
+MUTUAL_TIMEOUT_SECONDS = 180
 
 
 @dataclass(slots=True)
@@ -135,6 +136,11 @@ def append_flag_once(arguments: list[str], flag: str, enabled: bool) -> list[str
     return [*arguments, flag]
 
 
+def has_option(arguments: list[str], option: str) -> bool:
+    option_prefix = f"{option}="
+    return any(argument == option or argument.startswith(option_prefix) for argument in arguments)
+
+
 def run_command(command: list[str], name: str) -> int:
     print(f"[{now_text()}] start {name}: {subprocess.list2cmdline(command)}", flush=True)
     completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
@@ -190,6 +196,8 @@ def main() -> None:
     generator_script = DATA_GENERATOR
     generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
     judger_args = append_flag_once(args.judger_args, "--mutual", args.mutual)
+    if args.mutual and not has_option(judger_args, "--timeout"):
+        judger_args = [*judger_args, "--timeout", str(MUTUAL_TIMEOUT_SECONDS)]
     runtime_paths = resolve_runtime_paths(generator_args, judger_args)
     round_index = 1
     python = sys.executable

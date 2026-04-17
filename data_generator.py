@@ -36,6 +36,15 @@ MUTUAL_LAST_TENTHS = 500
 MUTUAL_MAX_REQUESTS = 70
 DEFAULT_MAINT_RATIO = 0.6
 DEFAULT_UPDATE_RATIO = 0.05
+SPECIAL_LOWER_OFFSET_TENTHS = 20
+MAINT_LATEST_GUARD_TENTHS = 60
+UPDATE_LATEST_GUARD_TENTHS = 120
+OVERLAP_UPDATE_LOWER_OFFSET_TENTHS = 110
+OVERLAP_MAINT_TO_UPDATE_GAP_TENTHS = 90
+RECYCLE_MIN_GAP_TENTHS = 80
+RECYCLE_MAX_GAP_DEFAULT_TENTHS = 140
+RECYCLE_MAX_GAP_MUTUAL_TENTHS = 110
+RECYCLE_FALLBACK_MIN_GAP_TENTHS = 70
 
 AUTO_MODE = "auto"
 TIME_MODE_UNIFORM = "uniform"
@@ -216,8 +225,25 @@ def build_recycle(tenths: int, elevator_id: int) -> RecycleRequest:
 def choose_special_counts(request_count: int, maint_ratio: float, update_ratio: float) -> tuple[int, int]:
     max_cycle = min(ELEVATOR_COUNT, max(0, (request_count - 6) // 10))
     cycle_count = min(max_cycle, int(round(request_count * update_ratio / 2)))
-    max_maint = min(ELEVATOR_COUNT - cycle_count, max(0, (request_count - 2 * cycle_count - 3) // 8))
+    # Keep maintenance and update/recycle quotas independent: each can reach the full shaft count.
+    max_maint = min(ELEVATOR_COUNT, max(0, (request_count - 3) // 8))
     maint_count = min(max_maint, int(round(request_count * maint_ratio)))
+    return maint_count, cycle_count
+
+
+def reduce_special_counts_to_budget(maint_count: int, cycle_count: int, request_count: int) -> tuple[int, int]:
+    # Reserve at least one person request; trim special requests instead of failing hard.
+    allowed_special = max(0, request_count - 1)
+    special_count = maint_count + 2 * cycle_count
+    if special_count <= allowed_special:
+        return maint_count, cycle_count
+
+    overflow = special_count - allowed_special
+    cycle_trim = min(cycle_count, (overflow + 1) // 2)
+    cycle_count -= cycle_trim
+    overflow = maint_count + 2 * cycle_count - allowed_special
+    if overflow > 0:
+        maint_count = max(0, maint_count - overflow)
     return maint_count, cycle_count
 
 
@@ -232,23 +258,44 @@ def generate_special_requests(
 ) -> tuple[list[InputRequest], int]:
     requests: list[InputRequest] = []
     shafts = list(range(1, ELEVATOR_COUNT + 1))
-    rng.shuffle(shafts)
-    cycle_shafts = sorted(shafts[:cycle_count])
-    maint_shafts = sorted(shafts[cycle_count:cycle_count + maint_count])
+    maint_shafts = sorted(rng.sample(shafts, k=maint_count)) if maint_count > 0 else []
+    cycle_shafts = sorted(rng.sample(shafts, k=cycle_count)) if cycle_count > 0 else []
+    overlap_shafts = set(maint_shafts).intersection(cycle_shafts)
 
-    for elevator_id in maint_shafts:
-        tenths = rng.randint(lower_tenths + 20, max(lower_tenths + 20, upper_tenths - 60))
-        requests.append(build_maint(next_request_id, tenths, elevator_id, rng.choice(MAINT_TARGET_FLOORS)))
-        next_request_id += 1
-
+    update_times_by_shaft: dict[int, int] = {}
     for shaft_id in cycle_shafts:
-        update_tenths = rng.randint(lower_tenths + 20, max(lower_tenths + 20, upper_tenths - 120))
-        recycle_gap = rng.randint(80, 140 if not mutual else 110)
+        update_lower = lower_tenths + SPECIAL_LOWER_OFFSET_TENTHS
+        if shaft_id in overlap_shafts:
+            # When a shaft has both MAINT and UPDATE, schedule UPDATE later to keep MAINT in NORMAL mode.
+            update_lower = max(update_lower, lower_tenths + OVERLAP_UPDATE_LOWER_OFFSET_TENTHS)
+        update_upper = max(update_lower, upper_tenths - UPDATE_LATEST_GUARD_TENTHS)
+        update_tenths = rng.randint(update_lower, update_upper)
+        update_times_by_shaft[shaft_id] = update_tenths
+
+        recycle_gap = rng.randint(
+            RECYCLE_MIN_GAP_TENTHS,
+            RECYCLE_MAX_GAP_MUTUAL_TENTHS if mutual else RECYCLE_MAX_GAP_DEFAULT_TENTHS,
+        )
         recycle_tenths = min(upper_tenths, update_tenths + recycle_gap)
         if recycle_tenths <= update_tenths + 60:
-            recycle_tenths = update_tenths + 70
+            recycle_tenths = update_tenths + RECYCLE_FALLBACK_MIN_GAP_TENTHS
         requests.append(build_update(update_tenths, shaft_id))
         requests.append(build_recycle(recycle_tenths, shaft_id + 6))
+
+    for elevator_id in maint_shafts:
+        maint_lower = lower_tenths + SPECIAL_LOWER_OFFSET_TENTHS
+        if elevator_id in overlap_shafts:
+            # Ensure MAINT is always before UPDATE on the same shaft.
+            update_tenths = update_times_by_shaft[elevator_id]
+            maint_upper = min(
+                upper_tenths - MAINT_LATEST_GUARD_TENTHS,
+                update_tenths - OVERLAP_MAINT_TO_UPDATE_GAP_TENTHS,
+            )
+        else:
+            maint_upper = upper_tenths - MAINT_LATEST_GUARD_TENTHS
+        tenths = rng.randint(maint_lower, max(maint_lower, maint_upper))
+        requests.append(build_maint(next_request_id, tenths, elevator_id, rng.choice(MAINT_TARGET_FLOORS)))
+        next_request_id += 1
     return requests, next_request_id
 
 
@@ -344,15 +391,9 @@ def main() -> None:
             upper_tenths = last_limit_tenths
 
         maint_count, cycle_count = choose_special_counts(request_count, args.maint_ratio, args.update_ratio)
+        maint_count, cycle_count = reduce_special_counts_to_budget(maint_count, cycle_count, request_count)
         special_count = maint_count + 2 * cycle_count
-        person_count = max(1, request_count - special_count)
-        while person_count + special_count > request_count and (maint_count > 0 or cycle_count > 0):
-            if cycle_count > 0:
-                cycle_count -= 1
-            elif maint_count > 0:
-                maint_count -= 1
-            special_count = maint_count + 2 * cycle_count
-            person_count = max(1, request_count - special_count)
+        person_count = request_count - special_count
 
         person_timestamps = generate_person_timestamps(
             pattern.time_mode,
