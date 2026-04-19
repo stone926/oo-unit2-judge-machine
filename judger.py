@@ -153,18 +153,23 @@ class CaseResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run and judge elevator hw7 test cases.")
-    parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
-    parser.add_argument("--project-jar", type=Path, default=DEFAULT_PROJECT_JAR)
-    parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
-    parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR)
-    parser.add_argument("--datainput", type=Path, default=DEFAULT_DATAINPUT_EXE)
-    parser.add_argument("--main-class", default="oo.Main")
-    parser.add_argument("--timeout", type=int, default=None)
-    parser.add_argument("--cases", nargs="*", default=None)
-    parser.add_argument("--mutual", action="store_true")
-    parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR, help="directory containing input case files (*.in)")
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="directory for judged program outputs")
+    parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR, help="directory for failure logs")
+    parser.add_argument("--project-jar", type=Path, default=DEFAULT_PROJECT_JAR, help="path to the project jar to execute")
+    parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR, help="source directory used when rebuilding the project jar")
+    parser.add_argument("--lib-jar", type=Path, default=DEFAULT_LIB_JAR, help="path to the official elevator library jar")
+    parser.add_argument("--datainput", type=Path, default=DEFAULT_DATAINPUT_EXE, help="path to the datainput feeder executable")
+    parser.add_argument("--main-class", default="oo.Main", help="main class name used when rebuilding")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="timeout seconds per case; defaults to 120 (or 180 with --mutual)",
+    )
+    parser.add_argument("--cases", nargs="*", default=None, help="optional case stems to run, such as: 1 2 3")
+    parser.add_argument("--mutual", action="store_true", help="enable mutual-test input constraints")
+    parser.add_argument("--rebuild", action="store_true", help="force rebuilding project jar before judging")
     return parser.parse_args()
 
 
