@@ -1,153 +1,182 @@
 # OO Unit2 测评机（hw7）
 
-全部由 `Codex GPT-5.4 xhigh` 编写
+默认建议在仓库根目录执行命令（即本目录的上一级）。
 
-## 使用方式
+## 1. 快速开始
+
+指定主类单论生成+评测：
 
 ```bash
-python run.py --judger-args --main-class YourMainClass
+python test/run.py --once --judger-args --main-class YourMainClass
 ```
 
-### 输入输出
+默认主类（`oo.Main`）单轮生成+评测：
 
-依赖数据投喂程序和官方输入输出 `jar` 包，默认寻找路径：
-- 数据投喂：`dependency/datainput`
-- 输入输出：`dependency/elevator3-2026.jar`
-
-通过 `judger` 的参数 `--datainput` 和 `--lib-jar` 修改依赖路径，若以 `run.py` 启动，需要通过 `--judger-args` 透传：
-```bash
-python run.py --judger-args --datainput in.exe --lib-jar lib.jar
-```
-
-### 项目打包
-
-测评需要将待测试的源代码打包为 `jar`，默认源代码路径为工程根目录下的 `src`，默认 `java` 主类为 `oo.Main`。通过 `judger` 的参数 `--source-dir` 和 `--main-class` 更改，例如：
-```bash
-python run.py --mutual --judger-args --main-class MainClass
-```
-其中 `--mutual` 为互测模式，使 `data-generator` 生成的数据都符合互测限制，使 `judger` 的校验都依照互测标准
-
-打包后的项目 `jar` 包默认为同目录下的 `project.jar`。通过 `judger` 的参数 `--project-jar` 修改：
-```bash
-python run.py --judger-args --project-jar tested.jar
-```
-
-### 启动测评
-
-永不停息地测评：
-```bash
-python test/run.py
-```
-
-单轮测评：
 ```bash
 python test/run.py --once
 ```
 
-互测模式与每轮之间时间间隔：
-```bash
-python test/run.py --once --mutual --sleep-seconds 1.5
-```
-### 参数透传
-
-`run.py` 也可以把参数原样透传给 `data_generator.py` 和 `judger.py`：
-
-- `--generator-args` 后面的参数会原样传给 `data_generator.py`
-- `--judger-args` 后面的参数会原样传给 `judger.py`
-- `run.py` 自身的参数需要放在这两个透传段之前
-- 通过 `--generator-args --output-dir` 和 `--judger-args --input-dir` 自定义测试数据目录，建议指向同一目录
-- `run.py` 默认不追加 `--rebuild`；如果需要每轮强制重新打包，请显式传入
-
-`run.py` 新增了 `--generator` 选项，可切换生成器脚本：
-
-- `--generator default`：使用 `data_generator.py`（默认）
-- `--generator stress`：使用 `stress_generator.py`（用于 MAINT/UPDATE/RECYCLE 压测）
-
-透传参数示例：
+持续循环评测（直到 Ctrl+C）：
 
 ```bash
-python test/run.py --once --generator-args --count 20 --min-requests 10 --max-requests 40 --judger-args --rebuild --cases 1 2 3
+python test/run.py
 ```
 
-使用压测生成器：
+互测模式单轮：
 
 ```bash
-python test/run.py --once --generator stress --generator-args --count 20 --double-wave --judger-args --rebuild
+python test/run.py --once --mutual
 ```
 
-自定义目录示例：
+## 2. 目录与依赖
+
+默认依赖路径：
+
+- 数据投喂程序：`test/dependency/datainput`
+- 官方输入输出包：`test/dependency/elevator3-2026.jar`
+
+默认产物路径：
+
+- 生成输入：`test/in`
+- 程序输出：`test/out`
+- 判题日志：`test/judge`
+
+## 3. run.py（调度入口）
+
+`run.py` 的职责：
+
+1. 调用 `data_generator.py` 生成输入。
+2. 调用 `judger.py` 构建并评测。
+3. 循环执行并自动归档日志（除 `--once` 外）。
+
+### 3.1 run.py 自身参数
+
+- `--once`：只跑一轮。
+- `--mutual`：向生成器和判题器同时透传 `--mutual`。
+- `--sleep-seconds`：多轮之间休眠秒数。
+
+### 3.2 参数透传规则
+
+- `--generator-args` 后的参数，原样传给 `data_generator.py`。
+- `--judger-args` 后的参数，原样传给 `judger.py`。
+- `run.py` 自身参数要写在透传段之前。
+
+示例：
 
 ```bash
-python test/run.py --generator-args --output-dir test/custom_in --judger-args --input-dir test/custom_in --output-dir test/custom_out --log-dir test/custom_judge
+python test/run.py --once --generator-args --count 10 --stress-mode auto --judger-args --rebuild --cases 1 2 3
 ```
 
-生成测试数据：
+## 4. data_generator.py（数据生成）
+
+基础命令：
 
 ```bash
 python test/data_generator.py
 ```
 
-每个测试点会同时生成带时间戳的 `<i>.in` 和不带时间戳的 `<i>.no.in`。
-`data_generator.py` 每次运行都会自动使用随机 `seed`，并在输出中打印本次使用的 `seed`。
+每次运行会生成：
 
-常用参数示例：
+- 带时间戳输入：`<i>.in`
+- 去时间戳输入：`<i>.no.in`
 
-```bash
-python test/data_generator.py --count 20 --min-requests 10 --max-requests 40
-```
+并在终端打印本次随机种子 `seed`，便于复现。
 
+### 4.1 主要参数
 
-```bash
-python test/data_generator.py --count 20 --last-request-limit 80.0 --maint-ratio 0.30
-```
+- `--count`：测试点个数，默认 `20`。
+- `--mutual`：按互测限制生成。
+- `--min-requests` / `--max-requests`：每个测试点总请求数范围。
+- `--output-dir`：输出目录。
+- `--last-request-limit`：默认模式下最后一条输入时间上限（秒），默认 `80.0`。
+- `--maint-ratio`：普通模式中 MAINT 目标占比，默认 `0.60`，范围 `[0, 0.6]`。
+- `--update-ratio`：普通模式中 UPDATE/RECYCLE 目标占比，默认 `0.05`，范围 `[0, 0.6]`。
+- `--time-mode`：`auto | uniform | burst`。
+- `--pickup-mode`：`auto | clustered | uniform`。
+- `--dropoff-mode`：`auto | clustered | uniform`。
+- `--stress-mode`：`none | auto | special-burst | shaft-chain | maint-wave | transfer-flood`，默认 `auto`。
 
-指定时间与空间模式：
+### 4.2 stress-mode 说明
 
-```bash
-python test/data_generator.py --time-mode burst --pickup-mode clustered --dropoff-mode uniform
-```
+- `none`：关闭场景化压测，回到比例驱动生成。
+- `auto`：按 case 轮转所有压测 profile。
+- `special-burst`：多井道高密度 MAINT/UPDATE/RECYCLE 混合冲击。
+- `shaft-chain`：单井道链式 UPDATE-RECYCLE（含 MAINT 交错）连续冲击。
+- `maint-wave`：多波次 MAINT 集中到达，夹杂 UPDATE/RECYCLE。
+- `transfer-flood`：围绕 F2 换乘与上下区跨区流动的乘客洪峰，叠加特殊请求。
 
-`data_generator.py` 新增参数说明：
+### 4.3 常用示例
 
-- `--last-request-limit`：默认模式中最后一条输入请求时间上限，默认 `80.0` 秒；互测模式固定 `50.0` 秒，不受该参数影响
-- `--maint-ratio`：每个测试点 MAINT 请求占比目标，默认 `0.30`
-- `--time-mode`：时间模式，`auto|uniform|burst`
-- `--pickup-mode`：上客楼层空间模式，`auto|clustered|uniform`
-- `--dropoff-mode`：下客楼层空间模式，`auto|clustered|uniform`
-
-模式组合规则：
-
-- `auto` 时按笛卡尔积轮转
-- 时间模式：`uniform`（均匀分布）和 `burst`（短时间高并发）
-- 空间模式：上客楼层 `clustered|uniform` 与下客楼层 `clustered|uniform` 自由组合
-
-互测模式：
+默认压力轮转：
 
 ```bash
-python test/data_generator.py --mutual
+python test/data_generator.py --count 20 --stress-mode auto
 ```
 
-互测模式约束：
+只测链式特殊请求：
 
-- 程序运行时间上限为120s
-- 第一条指令的投喂时间在1s或1s以后
-- 最后一条指令的输入时间不晚于50s
-- 指令条数不超过70
-- 同一部电梯最多有30条相关的乘客请求
-
-互测模式示例：
 ```bash
-python test/data_generator.py --mutual --count 10 --min-requests 30 --max-requests 70
+python test/data_generator.py --count 20 --stress-mode shaft-chain
 ```
 
-运行评判：
+互测约束下生成压力点：
+
+```bash
+python test/data_generator.py --mutual --count 20 --min-requests 55 --max-requests 70 --stress-mode auto
+```
+
+## 5. judger.py（构建与评判）
+
+基础命令：
+
 ```bash
 python test/judger.py
 ```
 
-`judger.py` 默认单个测试点超时为 `120s`；如果显式传入 `--timeout`，则以显式值为准。
+默认会从 `src` 打包为 `test/project.jar`，主类默认 `oo.Main`。
 
-强制重新打包并只测指定测试点：
+### 5.1 常用参数
+
+- `--rebuild`：强制重新构建 `project.jar`。
+- `--main-class`：指定主类。
+- `--source-dir`：指定源码目录。
+- `--project-jar`：指定待测 jar。
+- `--lib-jar`：指定官方依赖 jar。
+- `--datainput`：指定投喂程序路径。
+- `--input-dir` / `--output-dir` / `--log-dir`：输入、输出、日志目录。
+- `--cases`：只跑指定 case（例如 `--cases 1 2 3`）。
+- `--mutual`：启用互测输入限制校验。
+- `--timeout`：单测点超时秒数。
+
+### 5.2 超时与互测校验
+
+- 默认超时：`120s`。
+- `--mutual` 下默认超时：`180s`。
+- 显式传入 `--timeout` 时，以显式值为准。
+
+互测输入校验（由 `judger.py` 和 `data_generator.py` 共同保证）：
+
+- 第一条请求时间 `>= 1.0s`
+- 最后一条请求时间 `<= 50.0s`
+- 请求总数 `<= 70`
+- 每部主电梯最多 1 条 MAINT 请求
+
+## 6. 组合示例
+
+单轮、强制重编译、只测部分 case：
+
 ```bash
-python test/judger.py --rebuild --cases 1 2 3
+python test/run.py --once --judger-args --rebuild --cases 1 2 3
+```
+
+生成到自定义目录并用同目录评测：
+
+```bash
+python test/run.py --once --generator-args --output-dir test/custom_in --stress-mode auto --judger-args --input-dir test/custom_in --output-dir test/custom_out --log-dir test/custom_judge
+```
+
+使用自定义主类：
+
+```bash
+python test/run.py --once --judger-args --main-class YourMainClass --rebuild
 ```
