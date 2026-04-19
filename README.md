@@ -1,6 +1,10 @@
 # OO Unit2 测评机（hw7）
 
-默认建议在仓库根目录执行命令（即本目录的上一级）。
+本文档以测评机放在 `<repo_root>/test` 且在项目根目录下运行命令下为例。
+
+测评机依赖（设测评机所在目录为`<machine_root>`）：
+- 数据投喂程序：`<machine_root>/dependency/datainput`
+- 官方输入输出包：`<machine_root>/dependency/elevator3-2026.jar`
 
 ## 1. 快速开始
 
