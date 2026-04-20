@@ -818,12 +818,12 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
                     feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
                 except OSError:
                     feeder_stderr = ""
-            timeout_stderr = stderr_text + f"[Judger] Time Limit Exceed: did not finished within {timeout} seconds\n"
+            timeout_stderr = stderr_text + f"[Judger] Time Limit Exceed: did not finish within {timeout} seconds\n"
             if feeder_stderr.strip():
                 timeout_stderr += f"[Datainput stderr]\n{feeder_stderr}"
             out_path.write_text(stdout_text, encoding="utf-8")
             err_path.write_text(timeout_stderr, encoding="utf-8")
-            raise JudgeFailure(f"Time Limit Exceed: did not finished within {timeout} seconds")
+            raise JudgeFailure(f"Time Limit Exceed: did not finish within {timeout} seconds")
 
         if feeder.stderr is not None:
             feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")

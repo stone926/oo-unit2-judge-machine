@@ -447,6 +447,41 @@ def select_special_units(
     return selected
 
 
+def sanitize_special_events_for_mode(events: list[SpecialEventSpec]) -> list[SpecialEventSpec]:
+    # Keep generated special requests aligned with hw7 input constraints:
+    # MAINT/UPDATE should appear in NORMAL, RECYCLE should appear in DOUBLE.
+    kind_order = {"maint": 0, "update": 1, "recycle": 2}
+    shaft_in_double = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    sanitized: list[SpecialEventSpec] = []
+    sorted_events = sorted(events, key=lambda event: (event.tenths, kind_order[event.kind], event.elevator_id))
+
+    for event in sorted_events:
+        if event.kind == "maint":
+            shaft_id = event.elevator_id
+            if shaft_in_double[shaft_id]:
+                continue
+            sanitized.append(event)
+            continue
+
+        if event.kind == "update":
+            shaft_id = event.elevator_id
+            if shaft_in_double[shaft_id]:
+                continue
+            shaft_in_double[shaft_id] = True
+            sanitized.append(event)
+            continue
+
+        shaft_id = event.elevator_id - ELEVATOR_COUNT
+        if shaft_id < 1 or shaft_id > ELEVATOR_COUNT:
+            continue
+        if not shaft_in_double[shaft_id]:
+            continue
+        shaft_in_double[shaft_id] = False
+        sanitized.append(event)
+
+    return sanitized
+
+
 def materialize_special_events(
     rng: random.Random,
     events: list[SpecialEventSpec],
@@ -482,17 +517,19 @@ def generate_stress_special_requests(
 ) -> tuple[list[InputRequest], int, list[SpecialEventSpec]]:
     max_special = max(0, request_count - 1)
     units = build_stress_special_units(stress_mode, rng, lower_tenths, upper_tenths, mutual)
-    selected_events = select_special_units(units, max_special, mutual)
+    selected_events = sanitize_special_events_for_mode(select_special_units(units, max_special, mutual))
 
     if (not selected_events) and max_special >= 2:
         center = lower_tenths + (upper_tenths - lower_tenths) // 2
         fallback_update = clamp_tenths(center, lower_tenths, upper_tenths)
         fallback_recycle = fallback_update + PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS
         if fallback_recycle <= upper_tenths:
-            selected_events = [
-                SpecialEventSpec(kind="update", tenths=fallback_update, elevator_id=1),
-                SpecialEventSpec(kind="recycle", tenths=fallback_recycle, elevator_id=1 + ELEVATOR_COUNT),
-            ]
+            selected_events = sanitize_special_events_for_mode(
+                [
+                    SpecialEventSpec(kind="update", tenths=fallback_update, elevator_id=1),
+                    SpecialEventSpec(kind="recycle", tenths=fallback_recycle, elevator_id=1 + ELEVATOR_COUNT),
+                ]
+            )
 
     requests, next_request_id = materialize_special_events(rng, selected_events, next_request_id)
     return requests, next_request_id, selected_events
