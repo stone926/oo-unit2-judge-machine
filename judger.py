@@ -803,35 +803,40 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
             timed_out = True
             stdout_text = normalize_subprocess_text(exc.stdout)
             stderr_text = normalize_subprocess_text(exc.stderr)
-        if not timed_out:
-            if feeder.stderr is not None:
-                feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
-            try:
-                feeder.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                feeder_wait_timeout = True
+        if timed_out:
+            terminate_process(java)
+            terminate_process(feeder)
+            if java is not None:
+                try:
+                    extra_stdout, extra_stderr = java.communicate(timeout=3)
+                    stdout_text += normalize_subprocess_text(extra_stdout)
+                    stderr_text += normalize_subprocess_text(extra_stderr)
+                except (subprocess.TimeoutExpired, OSError, ValueError):
+                    pass
+            if feeder is not None and feeder.stderr is not None:
+                try:
+                    feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
+                except OSError:
+                    feeder_stderr = ""
+            timeout_stderr = stderr_text + f"[Judger] Time Limit Exceed: did not finished within {timeout} seconds\n"
+            if feeder_stderr.strip():
+                timeout_stderr += f"[Datainput stderr]\n{feeder_stderr}"
+            out_path.write_text(stdout_text, encoding="utf-8")
+            err_path.write_text(timeout_stderr, encoding="utf-8")
+            return stdout_text, timeout_stderr
+
+        if feeder.stderr is not None:
+            feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
+        try:
+            feeder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            feeder_wait_timeout = True
     finally:
         terminate_process(java)
         terminate_process(feeder)
         cleanup_temp_dir(temp_dir)
 
-    if timed_out and java is not None:
-        try:
-            extra_stdout, extra_stderr = java.communicate(timeout=3)
-            stdout_text += normalize_subprocess_text(extra_stdout)
-            stderr_text += normalize_subprocess_text(extra_stderr)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            pass
-
-    if feeder is not None and feeder.stderr is not None and not feeder_stderr:
-        try:
-            feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
-        except OSError:
-            feeder_stderr = ""
-
     combined_stderr = stderr_text
-    if timed_out:
-        combined_stderr += f"[Judger] Time Limit Exceed: did not finished within {timeout} seconds\n"
     if feeder_wait_timeout:
         combined_stderr += "[Judger] datainput did not exit within 5 seconds and was terminated\n"
     if java is not None and java.returncode != 0:
@@ -842,8 +847,6 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
         combined_stderr += f"[Datainput stderr]\n{feeder_stderr}"
     out_path.write_text(stdout_text, encoding="utf-8")
     err_path.write_text(combined_stderr, encoding="utf-8")
-    if timed_out:
-        raise TimeoutError(f"Time Limit Exceed: did not finished within {timeout} seconds")
     return stdout_text, combined_stderr
 
 
