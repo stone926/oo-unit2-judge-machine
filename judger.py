@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import argparse
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -9,6 +10,7 @@ import re
 import signal
 import shutil
 import subprocess
+import time
 
 from judge_common import (
     CAPACITY,
@@ -53,6 +55,14 @@ MUTUAL_LAST_REQUEST_TIME = Decimal("50.0")
 MUTUAL_MAX_REQUESTS = 70
 IS_WINDOWS = os.name == "nt"
 WINDOWS_PROCESS_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
+JUDGE_CASE_TEMP_GLOB = ".judge_case_*_tmp"
+JUDGE_BUILD_TEMP_NAME = ".judge_build_tmp"
+ACTIVE_TEMP_DIRS: set[Path] = set()
+ACTIVE_PROCESSES: set[subprocess.Popen] = set()
+CLEANUP_GUARDS_INSTALLED = False
+CLEANUP_IN_PROGRESS = False
+COMMUNICATE_POLL_INTERVAL = 0.2
+FEEDER_WAIT_SECONDS = 5.0
 
 ID12 = r"([1-9]|1[0-2])"
 RECEIVE_RE = re.compile(rf"^RECEIVE-(\d+)-{ID12}$")
@@ -222,9 +232,9 @@ def build_project_jar(project_jar: Path, source_dir: Path, lib_jar: Path, main_c
     ensure_directory(project_jar.parent)
     if project_jar.exists():
         project_jar.unlink()
-    temp_dir = project_jar.parent / ".judge_build_tmp"
+    temp_dir = register_temp_dir(project_jar.parent / JUDGE_BUILD_TEMP_NAME)
     if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        cleanup_temp_dir(temp_dir)
     classes_dir = temp_dir / "classes"
     classes_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = temp_dir / "MANIFEST.MF"
@@ -245,7 +255,8 @@ def build_project_jar(project_jar: Path, source_dir: Path, lib_jar: Path, main_c
         except RuntimeError:
             run_command(["jar", "cfm", str(project_jar), str(manifest_path), "-C", str(classes_dir), "."], REPO_ROOT)
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        cleanup_temp_dir(temp_dir)
+        unregister_temp_dir(temp_dir)
 
 
 def less_than(left: Decimal, right: Decimal) -> bool:
@@ -714,6 +725,24 @@ def terminate_process(process: subprocess.Popen | None) -> None:
         pass
 
 
+def register_process(process: subprocess.Popen | None) -> None:
+    if process is None:
+        return
+    ACTIVE_PROCESSES.add(process)
+
+
+def unregister_process(process: subprocess.Popen | None) -> None:
+    if process is None:
+        return
+    ACTIVE_PROCESSES.discard(process)
+
+
+def terminate_active_processes() -> None:
+    for process in list(ACTIVE_PROCESSES):
+        terminate_process(process)
+        ACTIVE_PROCESSES.discard(process)
+
+
 def cleanup_temp_dir(path: Path) -> None:
     if not path.exists():
         return
@@ -721,6 +750,63 @@ def cleanup_temp_dir(path: Path) -> None:
         shutil.rmtree(path)
     except OSError:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def discover_temp_dirs() -> set[Path]:
+    discovered = {path.resolve() for path in SCRIPT_DIR.glob(JUDGE_CASE_TEMP_GLOB) if path.is_dir()}
+    default_build_dir = SCRIPT_DIR / JUDGE_BUILD_TEMP_NAME
+    if default_build_dir.is_dir():
+        discovered.add(default_build_dir.resolve())
+    return discovered
+
+
+def register_temp_dir(path: Path) -> Path:
+    resolved = path.resolve()
+    ACTIVE_TEMP_DIRS.add(resolved)
+    return resolved
+
+
+def unregister_temp_dir(path: Path) -> None:
+    ACTIVE_TEMP_DIRS.discard(path.resolve())
+
+
+def cleanup_all_temp_dirs() -> None:
+    global CLEANUP_IN_PROGRESS
+    if CLEANUP_IN_PROGRESS:
+        return
+    CLEANUP_IN_PROGRESS = True
+    try:
+        targets = set(ACTIVE_TEMP_DIRS)
+        targets.update(discover_temp_dirs())
+        for target in sorted(targets, key=lambda item: len(str(item)), reverse=True):
+            cleanup_temp_dir(target)
+            ACTIVE_TEMP_DIRS.discard(target)
+    finally:
+        CLEANUP_IN_PROGRESS = False
+
+
+def on_exit_signal(signum: int, _frame: object) -> None:
+    terminate_active_processes()
+    cleanup_all_temp_dirs()
+    if signum == getattr(signal, "SIGINT", None):
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+
+def install_cleanup_guards() -> None:
+    global CLEANUP_GUARDS_INSTALLED
+    if CLEANUP_GUARDS_INSTALLED:
+        return
+    atexit.register(cleanup_all_temp_dirs)
+    for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        target_signal = getattr(signal, signal_name, None)
+        if target_signal is None:
+            continue
+        try:
+            signal.signal(target_signal, on_exit_signal)
+        except (ValueError, OSError):
+            continue
+    CLEANUP_GUARDS_INSTALLED = True
 
 
 def normalize_subprocess_text(value: object | None) -> str:
@@ -740,7 +826,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
         out_path.unlink()
     if err_path.exists():
         err_path.unlink()
-    temp_dir = SCRIPT_DIR / f".judge_case_{case_path.stem}_tmp"
+    temp_dir = register_temp_dir(SCRIPT_DIR / f".judge_case_{case_path.stem}_tmp")
     if temp_dir.exists():
         cleanup_temp_dir(temp_dir)
     ensure_directory(temp_dir)
@@ -765,6 +851,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
                 stderr=subprocess.PIPE,
                 creationflags=WINDOWS_PROCESS_FLAGS,
             )
+            register_process(feeder)
             java = subprocess.Popen(
                 ["java", "-jar", "code.jar"],
                 cwd=temp_dir,
@@ -776,6 +863,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
                 errors="replace",
                 creationflags=WINDOWS_PROCESS_FLAGS,
             )
+            register_process(java)
         else:
             feeder = subprocess.Popen(
                 [str(local_datainput)],
@@ -784,6 +872,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            register_process(feeder)
             java = subprocess.Popen(
                 ["java", "-jar", "code.jar"],
                 cwd=temp_dir,
@@ -795,14 +884,23 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
                 errors="replace",
                 start_new_session=True,
             )
+            register_process(java)
         if feeder.stdout is not None:
             feeder.stdout.close()
-        try:
-            stdout_text, stderr_text = java.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            stdout_text = normalize_subprocess_text(exc.stdout)
-            stderr_text = normalize_subprocess_text(exc.stderr)
+        if java is None:
+            raise RuntimeError("java process is not created")
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            try:
+                stdout_text, stderr_text = java.communicate(timeout=min(COMMUNICATE_POLL_INTERVAL, remaining))
+                break
+            except subprocess.TimeoutExpired as exc:
+                stdout_text = normalize_subprocess_text(exc.stdout)
+                stderr_text = normalize_subprocess_text(exc.stderr)
         if timed_out:
             terminate_process(java)
             terminate_process(feeder)
@@ -825,16 +923,27 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
             err_path.write_text(timeout_stderr, encoding="utf-8")
             raise JudgeFailure(f"Time Limit Exceed: did not finish within {timeout} seconds")
 
-        if feeder.stderr is not None:
+        if feeder is not None and feeder.stderr is not None:
             feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
-        try:
-            feeder.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            feeder_wait_timeout = True
+        if feeder is not None:
+            feeder_wait_deadline = time.monotonic() + FEEDER_WAIT_SECONDS
+            while True:
+                remaining = feeder_wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    feeder_wait_timeout = True
+                    break
+                try:
+                    feeder.wait(timeout=min(COMMUNICATE_POLL_INTERVAL, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     finally:
         terminate_process(java)
         terminate_process(feeder)
+        unregister_process(java)
+        unregister_process(feeder)
         cleanup_temp_dir(temp_dir)
+        unregister_temp_dir(temp_dir)
 
     combined_stderr = stderr_text
     if feeder_wait_timeout:
@@ -878,6 +987,8 @@ def select_cases(input_dir: Path, selected_stems: list[str] | None) -> list[Path
 
 
 def main() -> None:
+    install_cleanup_guards()
+    cleanup_all_temp_dirs()
     args = parse_args()
     input_dir = args.input_dir.resolve()
     output_dir = args.output_dir.resolve()
@@ -924,4 +1035,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        cleanup_all_temp_dirs()
+        raise SystemExit(130)

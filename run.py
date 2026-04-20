@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import atexit
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,9 @@ OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
+JUDGER_CASE_TEMP_GLOB = ".judge_case_*_tmp"
+JUDGER_BUILD_TEMP_NAME = ".judge_build_tmp"
+RUNNER_CLEANUP_GUARDS_INSTALLED = False
 
 
 @dataclass(slots=True)
@@ -125,6 +130,53 @@ def resolve_runtime_paths(generator_args: list[str], judger_args: list[str]) -> 
     )
 
 
+def discover_judger_temp_dirs(base_dir: Path = SCRIPT_DIR) -> set[Path]:
+    discovered = {path.resolve() for path in base_dir.glob(JUDGER_CASE_TEMP_GLOB) if path.is_dir()}
+    build_dir = base_dir / JUDGER_BUILD_TEMP_NAME
+    if build_dir.is_dir():
+        discovered.add(build_dir.resolve())
+    return discovered
+
+
+def cleanup_judger_temp_dirs(base_dir: Path = SCRIPT_DIR) -> list[Path]:
+    removed: list[Path] = []
+    for temp_dir in sorted(discover_judger_temp_dirs(base_dir), key=lambda path: str(path)):
+        try:
+            shutil.rmtree(temp_dir)
+        except OSError:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        if not temp_dir.exists():
+            removed.append(temp_dir)
+    return removed
+
+
+def format_cleaned_dirs(paths: list[Path]) -> str:
+    return ", ".join(path.name for path in paths)
+
+
+def on_exit_signal(signum: int, _frame: object) -> None:
+    cleanup_judger_temp_dirs()
+    if signum == getattr(signal, "SIGINT", None):
+        raise KeyboardInterrupt
+    raise SystemExit(128 + signum)
+
+
+def install_cleanup_guards() -> None:
+    global RUNNER_CLEANUP_GUARDS_INSTALLED
+    if RUNNER_CLEANUP_GUARDS_INSTALLED:
+        return
+    atexit.register(cleanup_judger_temp_dirs)
+    for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        target_signal = getattr(signal, signal_name, None)
+        if target_signal is None:
+            continue
+        try:
+            signal.signal(target_signal, on_exit_signal)
+        except (ValueError, OSError):
+            continue
+    RUNNER_CLEANUP_GUARDS_INSTALLED = True
+
+
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -186,6 +238,13 @@ def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | Non
 
 
 def main() -> None:
+    install_cleanup_guards()
+    startup_cleaned = cleanup_judger_temp_dirs()
+    if startup_cleaned:
+        print(
+            f"[{now_text()}] cleaned stale judge temp dirs: {format_cleaned_dirs(startup_cleaned)}",
+            flush=True,
+        )
     args = parse_args()
     generator_script = DATA_GENERATOR
     generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
@@ -249,6 +308,13 @@ def main() -> None:
             else:
                 print(f"[{now_text()}] no judge logs to archive", flush=True)
 
+            round_cleaned = cleanup_judger_temp_dirs()
+            if round_cleaned:
+                print(
+                    f"[{now_text()}] cleaned judge temp dirs: {format_cleaned_dirs(round_cleaned)}",
+                    flush=True,
+                )
+
             if generator_code != 0 or (judger_code is not None and judger_code != 0):
                 print(f"[{now_text()}] round {round_index} finished with errors", flush=True)
             else:
@@ -262,6 +328,13 @@ def main() -> None:
                 time.sleep(args.sleep_seconds)
     except KeyboardInterrupt:
         print(f"\n[{now_text()}] loop stopped by user", flush=True)
+    finally:
+        final_cleaned = cleanup_judger_temp_dirs()
+        if final_cleaned:
+            print(
+                f"[{now_text()}] cleaned judge temp dirs on exit: {format_cleaned_dirs(final_cleaned)}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":
