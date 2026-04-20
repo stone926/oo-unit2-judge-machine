@@ -1,5 +1,7 @@
 # OO Unit2 测评机（hw7）
 
+代码由AI生成
+
 本文档以测评机放在 `<repo_root>/test` 且在项目根目录下运行命令下为例。
 
 测评机依赖（设测评机所在目录为`<machine_root>`）：
@@ -8,7 +10,7 @@
 
 ## 1. 快速开始
 
-指定主类单论生成+评测：
+指定主类单轮生成+评测：
 
 ```bash
 python test/run.py --once --judger-args --main-class YourMainClass
