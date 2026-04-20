@@ -10,7 +10,7 @@
 
 ## 1. 快速开始
 
-指定主类单论生成+评测：
+指定主类单轮生成+评测：
 
 ```bash
 python test/run.py --once --judger-args --main-class YourMainClass
