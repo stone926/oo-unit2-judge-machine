@@ -831,7 +831,7 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
 
     combined_stderr = stderr_text
     if timed_out:
-        combined_stderr += f"[Judger] Time Limit Exceed: java -jar code.jar exceeded {timeout} seconds\n"
+        combined_stderr += f"[Judger] Time Limit Exceed: did not finished within {timeout} seconds\n"
     if feeder_wait_timeout:
         combined_stderr += "[Judger] datainput did not exit within 5 seconds and was terminated\n"
     if java is not None and java.returncode != 0:
