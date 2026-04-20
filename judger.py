@@ -847,6 +847,8 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
         combined_stderr += f"[Datainput stderr]\n{feeder_stderr}"
     out_path.write_text(stdout_text, encoding="utf-8")
     err_path.write_text(combined_stderr, encoding="utf-8")
+    if timed_out:
+        raise JudgeFailure(f"Time Limit Exceed: did not finished within {timeout} seconds")
     return stdout_text, combined_stderr
 
 
