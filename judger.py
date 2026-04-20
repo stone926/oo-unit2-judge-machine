@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from decimal import Decimal
+import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 
@@ -49,6 +51,8 @@ MUTUAL_TIMEOUT = 180
 MUTUAL_FIRST_REQUEST_TIME = Decimal("1.0")
 MUTUAL_LAST_REQUEST_TIME = Decimal("50.0")
 MUTUAL_MAX_REQUESTS = 70
+IS_WINDOWS = os.name == "nt"
+WINDOWS_PROCESS_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
 
 ID12 = r"([1-9]|1[0-2])"
 RECEIVE_RE = re.compile(rf"^RECEIVE-(\d+)-{ID12}$")
@@ -419,12 +423,6 @@ def validate_output(case_path: Path, output_path: Path) -> None:
                         passenger = passengers.get(person_id)
                         if passenger is None or passenger.completed or passenger.onboard:
                             raise JudgeFailure(f"invalid RECEIVE for passenger {person_id}", line_number, line)
-                        # if less_than(timestamp, passenger.request_time):
-                        #     raise JudgeFailure(
-                        #         f"passenger {person_id} request has not arrived yet",
-                        #         line_number,
-                        #         line,
-                        #     )
                         if passenger.active_receive_elevator is not None:
                             raise JudgeFailure(f"passenger {person_id} still has an unfinished RECEIVE", line_number, line)
                         if not can_receive_now(shaft, car_id):
@@ -681,6 +679,60 @@ def validate_output(case_path: Path, output_path: Path) -> None:
         raise JudgeFailure(f"unfinished passengers at program end: {unfinished}")
 
 
+def terminate_process(process: subprocess.Popen | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    if process.pid > 0:
+        if IS_WINDOWS:
+            # On Windows, force-kill the whole process tree to avoid locked temp files.
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                pass
+        else:
+            killpg = getattr(os, "killpg", None)
+            sigkill = getattr(signal, "SIGKILL", None)
+            if callable(killpg) and sigkill is not None:
+                try:
+                    killpg(process.pid, sigkill)
+                except ProcessLookupError:
+                    return
+                except OSError:
+                    pass
+    try:
+        process.kill()
+    except OSError:
+        return
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def cleanup_temp_dir(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def normalize_subprocess_text(value: object | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return str(value)
+
+
 def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path, lib_jar: Path, datainput_exe: Path, timeout: int) -> tuple[str, str]:
     ensure_directory(out_path.parent)
     ensure_directory(err_path.parent)
@@ -690,43 +742,108 @@ def run_case(case_path: Path, out_path: Path, err_path: Path, project_jar: Path,
         err_path.unlink()
     temp_dir = SCRIPT_DIR / f".judge_case_{case_path.stem}_tmp"
     if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        cleanup_temp_dir(temp_dir)
     ensure_directory(temp_dir)
+    feeder: subprocess.Popen | None = None
+    java: subprocess.Popen | None = None
+    stdout_text = ""
+    stderr_text = ""
+    feeder_stderr = ""
+    feeder_wait_timeout = False
+    timed_out = False
     try:
         local_datainput = temp_dir / datainput_exe.name
         shutil.copy2(case_path, temp_dir / "stdin.txt")
         shutil.copy2(project_jar, temp_dir / "code.jar")
         shutil.copy2(lib_jar, temp_dir / lib_jar.name)
         shutil.copy2(datainput_exe, local_datainput)
-        feeder = subprocess.Popen([str(local_datainput)], cwd=temp_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        java = subprocess.Popen(
-            ["java", "-jar", "code.jar"],
-            cwd=temp_dir,
-            stdin=feeder.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        if IS_WINDOWS:
+            feeder = subprocess.Popen(
+                [str(local_datainput)],
+                cwd=temp_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=WINDOWS_PROCESS_FLAGS,
+            )
+            java = subprocess.Popen(
+                ["java", "-jar", "code.jar"],
+                cwd=temp_dir,
+                stdin=feeder.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=WINDOWS_PROCESS_FLAGS,
+            )
+        else:
+            feeder = subprocess.Popen(
+                [str(local_datainput)],
+                cwd=temp_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            java = subprocess.Popen(
+                ["java", "-jar", "code.jar"],
+                cwd=temp_dir,
+                stdin=feeder.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=True,
+            )
         if feeder.stdout is not None:
             feeder.stdout.close()
-        stdout_text, stderr_text = java.communicate(timeout=timeout)
-        feeder_stderr = ""
-        if feeder.stderr is not None:
-            feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
-        feeder.wait(timeout=5)
+        try:
+            stdout_text, stderr_text = java.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout_text = normalize_subprocess_text(exc.stdout)
+            stderr_text = normalize_subprocess_text(exc.stderr)
+        if not timed_out:
+            if feeder.stderr is not None:
+                feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
+            try:
+                feeder.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                feeder_wait_timeout = True
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        terminate_process(java)
+        terminate_process(feeder)
+        cleanup_temp_dir(temp_dir)
+
+    if timed_out and java is not None:
+        try:
+            extra_stdout, extra_stderr = java.communicate(timeout=3)
+            stdout_text += normalize_subprocess_text(extra_stdout)
+            stderr_text += normalize_subprocess_text(extra_stderr)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+
+    if feeder is not None and feeder.stderr is not None and not feeder_stderr:
+        try:
+            feeder_stderr = feeder.stderr.read().decode("utf-8", errors="replace")
+        except OSError:
+            feeder_stderr = ""
+
     combined_stderr = stderr_text
-    if java.returncode != 0:
-        combined_stderr += f"\n[Judger] java exited with code {java.returncode}\n"
-    if feeder.returncode != 0:
-        combined_stderr += f"\n[Judger] datainput exited with code {feeder.returncode}\n"
+    if timed_out:
+        combined_stderr += f"[Judger] Time Limit Exceed: java -jar code.jar exceeded {timeout} seconds\n"
+    if feeder_wait_timeout:
+        combined_stderr += "[Judger] datainput did not exit within 5 seconds and was terminated\n"
+    if java is not None and java.returncode != 0:
+        combined_stderr += f"[Judger] java exited with code {java.returncode}\n"
+    if feeder is not None and feeder.returncode != 0:
+        combined_stderr += f"[Judger] datainput exited with code {feeder.returncode}\n"
     if feeder_stderr.strip():
-        combined_stderr += f"\n[Datainput stderr]\n{feeder_stderr}"
+        combined_stderr += f"[Datainput stderr]\n{feeder_stderr}"
     out_path.write_text(stdout_text, encoding="utf-8")
     err_path.write_text(combined_stderr, encoding="utf-8")
+    if timed_out:
+        raise TimeoutError(f"Time Limit Exceed: did not finished within {timeout} seconds")
     return stdout_text, combined_stderr
 
 
