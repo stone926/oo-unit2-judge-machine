@@ -12,6 +12,7 @@ from judge_common import (
     ELEVATOR_COUNT,
     InputRequest,
     MAINT_TARGET_FLOORS,
+    MUTUAL_MAX_REQUESTS,
     MaintRequest,
     PersonRequest,
     RecycleRequest,
@@ -20,6 +21,8 @@ from judge_common import (
     ensure_directory,
     format_input_timestamp,
     load_case,
+    validate_hw7_special_constraints,
+    validate_mutual_case,
     write_case,
     write_case_without_timestamp,
 )
@@ -33,7 +36,6 @@ DEFAULT_MAX_REQUESTS = 100
 DEFAULT_LAST_REQUEST_LIMIT_SECONDS = Decimal("80.0")
 MUTUAL_FIRST_TENTHS = 10
 MUTUAL_LAST_TENTHS = 500
-MUTUAL_MAX_REQUESTS = 70
 DEFAULT_MAINT_RATIO = 0.6
 DEFAULT_UPDATE_RATIO = 0.05
 SPECIAL_LOWER_OFFSET_TENTHS = 20
@@ -533,81 +535,6 @@ def sanitize_special_events_for_mode(
     return repaired
 
 
-def validate_hw7_special_constraints(requests: list[InputRequest], mutual: bool) -> None:
-    in_double = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
-    last_special_time: dict[int, Decimal | None] = {
-        shaft_id: None for shaft_id in range(1, ELEVATOR_COUNT + 1)
-    }
-    maint_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
-    update_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
-    recycle_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
-
-    for request in requests:
-        shaft_id: int | None = None
-        kind: str | None = None
-        if isinstance(request, MaintRequest):
-            shaft_id = request.elevator_id
-            kind = "maint"
-        elif isinstance(request, UpdateRequest):
-            shaft_id = request.elevator_id
-            kind = "update"
-        elif isinstance(request, RecycleRequest):
-            shaft_id = request.elevator_id - ELEVATOR_COUNT
-            kind = "recycle"
-
-        if shaft_id is None or kind is None:
-            continue
-
-        last_time = last_special_time[shaft_id]
-        if last_time is not None and request.timestamp - last_time < Decimal("8.0"):
-            raise RuntimeError(
-                f"special requests on shaft {shaft_id} must be at least 8.0s apart"
-            )
-        last_special_time[shaft_id] = request.timestamp
-
-        if kind == "maint":
-            if in_double[shaft_id]:
-                raise RuntimeError(f"MAINT on shaft {shaft_id} must be in NORMAL mode")
-            maint_count[shaft_id] += 1
-            if mutual and maint_count[shaft_id] > 1:
-                raise RuntimeError(
-                    f"mutual mode requires at most one MAINT per shaft, got {maint_count[shaft_id]} on shaft {shaft_id}"
-                )
-            continue
-
-        if kind == "update":
-            if in_double[shaft_id]:
-                raise RuntimeError(f"UPDATE on shaft {shaft_id} must be in NORMAL mode")
-            update_count[shaft_id] += 1
-            if update_count[shaft_id] > 1:
-                raise RuntimeError(
-                    f"shaft {shaft_id} can have at most one UPDATE request"
-                )
-            in_double[shaft_id] = True
-            continue
-
-        if not in_double[shaft_id]:
-            raise RuntimeError(f"RECYCLE on shaft {shaft_id} must be in DOUBLE mode")
-        recycle_count[shaft_id] += 1
-        if recycle_count[shaft_id] > 1:
-            raise RuntimeError(
-                f"shaft {shaft_id} can have at most one RECYCLE request"
-            )
-        in_double[shaft_id] = False
-
-    for shaft_id in range(1, ELEVATOR_COUNT + 1):
-        if in_double[shaft_id]:
-            raise RuntimeError(
-                f"shaft {shaft_id} ends in DOUBLE mode: generated UPDATE without matching RECYCLE"
-            )
-        if update_count[shaft_id] != recycle_count[shaft_id]:
-            raise RuntimeError(
-                f"shaft {shaft_id} has unmatched UPDATE/RECYCLE counts: {update_count[shaft_id]} vs {recycle_count[shaft_id]}"
-            )
-
-    return
-
-
 def materialize_special_events(
     rng: random.Random,
     events: list[SpecialEventSpec],
@@ -902,25 +829,6 @@ def sort_requests(requests: list[InputRequest]) -> list[InputRequest]:
         return request.timestamp, 3, request.elevator_id
 
     return sorted(requests, key=sort_key)
-
-
-def validate_mutual_case(requests: list[InputRequest]) -> None:
-    if not requests:
-        raise RuntimeError("mutual mode requires at least one request")
-    if requests[0].timestamp < Decimal("1.0"):
-        raise RuntimeError("mutual mode requires the first request time to be at least 1.0s")
-    if requests[-1].timestamp > Decimal("50.0"):
-        raise RuntimeError("mutual mode requires the last request time to be at most 50.0s")
-    if len(requests) > MUTUAL_MAX_REQUESTS:
-        raise RuntimeError(f"mutual mode request count must be at most {MUTUAL_MAX_REQUESTS}")
-    maint_count_by_elevator = {elevator_id: 0 for elevator_id in range(1, ELEVATOR_COUNT + 1)}
-    for request in requests:
-        if isinstance(request, MaintRequest):
-            maint_count_by_elevator[request.elevator_id] += 1
-            if maint_count_by_elevator[request.elevator_id] > 1:
-                raise RuntimeError(
-                    f"mutual mode requires each elevator to have at most one maintenance request"
-                )
 
 
 def resolve_request_bounds(mutual: bool, min_requests: int | None, max_requests: int | None) -> tuple[int, int]:
