@@ -44,7 +44,7 @@ OVERLAP_MAINT_TO_UPDATE_GAP_TENTHS = 90
 RECYCLE_MIN_GAP_TENTHS = 80
 RECYCLE_MAX_GAP_DEFAULT_TENTHS = 140
 RECYCLE_MAX_GAP_MUTUAL_TENTHS = 110
-RECYCLE_FALLBACK_MIN_GAP_TENTHS = 70
+RECYCLE_FALLBACK_MIN_GAP_TENTHS = 80
 
 STRESS_MODE_NONE = "none"
 STRESS_MODE_SPECIAL_BURST = "special-burst"
@@ -61,11 +61,12 @@ STRESS_MODE_ORDER = (
 LOW_ZONE_FLOORS = ("B4", "B3", "B2", "B1", "F1")
 UP_ZONE_FLOORS = ("F3", "F4", "F5", "F6", "F7")
 
-PRESSURE_MIN_UPDATE_RECYCLE_GAP_TENTHS = 70
+PRESSURE_MIN_UPDATE_RECYCLE_GAP_TENTHS = 80
 PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS = 90
 PRESSURE_MAINT_TO_UPDATE_GAP_TENTHS = 90
-PRESSURE_NEXT_CYCLE_GAP_TENTHS = 70
+PRESSURE_NEXT_CYCLE_GAP_TENTHS = 80
 PRESSURE_WAVE_MAINT_GAP_TENTHS = 82
+SPECIAL_MIN_GAP_TENTHS = 80
 
 AUTO_MODE = "auto"
 TIME_MODE_UNIFORM = "uniform"
@@ -307,17 +308,18 @@ def build_shaft_chain_units(
     mutual: bool,
 ) -> list[list[SpecialEventSpec]]:
     units: list[list[SpecialEventSpec]] = []
-    focus_shaft = rng.randint(1, ELEVATOR_COUNT)
+    shafts = list(range(1, ELEVATOR_COUNT + 1))
+    rng.shuffle(shafts)
     recycle_gap_upper = PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS + (8 if mutual else 20)
     cursor = lower_tenths + 20
     maint_count = 0
 
-    for _ in range(12):
+    for shaft_id in shafts:
         if cursor > upper_tenths - (PRESSURE_MIN_UPDATE_RECYCLE_GAP_TENTHS + 10):
             break
         add_maint = (not mutual and rng.random() < 0.75) or (mutual and maint_count == 0)
         if add_maint:
-            if add_maint_unit(units, cursor, focus_shaft, lower_tenths, upper_tenths):
+            if add_maint_unit(units, cursor, shaft_id, lower_tenths, upper_tenths):
                 maint_count += 1
             update_tenths = cursor + rng.randint(
                 PRESSURE_MAINT_TO_UPDATE_GAP_TENTHS - 8,
@@ -327,8 +329,7 @@ def build_shaft_chain_units(
             update_tenths = cursor + rng.randint(12, 28)
 
         recycle_tenths = update_tenths + rng.randint(PRESSURE_MIN_UPDATE_RECYCLE_GAP_TENTHS, recycle_gap_upper)
-        if not add_cycle_unit(units, focus_shaft, update_tenths, recycle_tenths, lower_tenths, upper_tenths):
-            break
+        add_cycle_unit(units, shaft_id, update_tenths, recycle_tenths, lower_tenths, upper_tenths)
         cursor = recycle_tenths + rng.randint(PRESSURE_NEXT_CYCLE_GAP_TENTHS, PRESSURE_NEXT_CYCLE_GAP_TENTHS + 16)
 
     has_cycle = any(event.kind == "update" for unit in units for event in unit)
@@ -336,7 +337,7 @@ def build_shaft_chain_units(
         center = lower_tenths + (upper_tenths - lower_tenths) // 2
         add_cycle_unit(
             units,
-            focus_shaft,
+            shafts[0],
             center,
             center + PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS,
             lower_tenths,
@@ -353,6 +354,9 @@ def build_maint_wave_units(
 ) -> list[list[SpecialEventSpec]]:
     units: list[list[SpecialEventSpec]] = []
     shafts = list(range(1, ELEVATOR_COUNT + 1))
+    cycle_count = 3 if mutual else 4
+    cycle_shafts = set(rng.sample(shafts, k=cycle_count))
+
     first_wave = lower_tenths + max(15, (upper_tenths - lower_tenths) // 4)
     wave_times = [first_wave]
     second_wave = first_wave + PRESSURE_WAVE_MAINT_GAP_TENTHS
@@ -360,16 +364,15 @@ def build_maint_wave_units(
         wave_times.append(second_wave)
 
     for wave_tenths in wave_times:
-        wave_shafts = shafts.copy()
+        # Keep maint and cycle targets disjoint here to avoid <8s overlaps on one shaft.
+        wave_shafts = [shaft_id for shaft_id in shafts if shaft_id not in cycle_shafts]
         rng.shuffle(wave_shafts)
         for idx, shaft_id in enumerate(wave_shafts):
             add_maint_unit(units, wave_tenths + idx % 3, shaft_id, lower_tenths, upper_tenths)
 
-    cycle_count = 3 if mutual else 4
-    cycle_shafts = rng.sample(shafts, k=cycle_count)
     recycle_gap_upper = PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS + (8 if mutual else 18)
     cycle_anchor = first_wave + 36
-    for idx, shaft_id in enumerate(cycle_shafts):
+    for idx, shaft_id in enumerate(sorted(cycle_shafts)):
         update_tenths = cycle_anchor + idx * 5 + rng.randint(0, 2)
         recycle_tenths = update_tenths + rng.randint(PRESSURE_MIN_UPDATE_RECYCLE_GAP_TENTHS + 5, recycle_gap_upper)
         add_cycle_unit(units, shaft_id, update_tenths, recycle_tenths, lower_tenths, upper_tenths)
@@ -447,11 +450,24 @@ def select_special_units(
     return selected
 
 
-def sanitize_special_events_for_mode(events: list[SpecialEventSpec]) -> list[SpecialEventSpec]:
-    # Keep generated special requests aligned with hw7 input constraints:
-    # MAINT/UPDATE should appear in NORMAL, RECYCLE should appear in DOUBLE.
+def sanitize_special_events_for_mode(
+    events: list[SpecialEventSpec],
+    mutual: bool,
+) -> list[SpecialEventSpec]:
+    # Keep generated special requests aligned with hw7 input constraints.
+    # Rules enforced here:
+    # 1) MAINT/UPDATE in NORMAL only; RECYCLE in DOUBLE only.
+    # 2) Same shaft special requests must be >= 8.0s apart.
+    # 3) Same shaft allows at most one UPDATE and one RECYCLE.
+    # 4) Mutual mode keeps at most one MAINT per shaft.
     kind_order = {"maint": 0, "update": 1, "recycle": 2}
     shaft_in_double = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    shaft_last_special_tenths: dict[int, int | None] = {
+        shaft_id: None for shaft_id in range(1, ELEVATOR_COUNT + 1)
+    }
+    maint_count_by_shaft = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    update_seen = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    recycle_seen = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
     sanitized: list[SpecialEventSpec] = []
     sorted_events = sorted(events, key=lambda event: (event.tenths, kind_order[event.kind], event.elevator_id))
 
@@ -460,6 +476,13 @@ def sanitize_special_events_for_mode(events: list[SpecialEventSpec]) -> list[Spe
             shaft_id = event.elevator_id
             if shaft_in_double[shaft_id]:
                 continue
+            if mutual and maint_count_by_shaft[shaft_id] >= 1:
+                continue
+            last_tenths = shaft_last_special_tenths[shaft_id]
+            if last_tenths is not None and event.tenths - last_tenths < SPECIAL_MIN_GAP_TENTHS:
+                continue
+            maint_count_by_shaft[shaft_id] += 1
+            shaft_last_special_tenths[shaft_id] = event.tenths
             sanitized.append(event)
             continue
 
@@ -467,7 +490,14 @@ def sanitize_special_events_for_mode(events: list[SpecialEventSpec]) -> list[Spe
             shaft_id = event.elevator_id
             if shaft_in_double[shaft_id]:
                 continue
+            if update_seen[shaft_id]:
+                continue
+            last_tenths = shaft_last_special_tenths[shaft_id]
+            if last_tenths is not None and event.tenths - last_tenths < SPECIAL_MIN_GAP_TENTHS:
+                continue
+            update_seen[shaft_id] = True
             shaft_in_double[shaft_id] = True
+            shaft_last_special_tenths[shaft_id] = event.tenths
             sanitized.append(event)
             continue
 
@@ -476,10 +506,106 @@ def sanitize_special_events_for_mode(events: list[SpecialEventSpec]) -> list[Spe
             continue
         if not shaft_in_double[shaft_id]:
             continue
+        if recycle_seen[shaft_id]:
+            continue
+        last_tenths = shaft_last_special_tenths[shaft_id]
+        if last_tenths is not None and event.tenths - last_tenths < SPECIAL_MIN_GAP_TENTHS:
+            continue
+        recycle_seen[shaft_id] = True
         shaft_in_double[shaft_id] = False
+        shaft_last_special_tenths[shaft_id] = event.tenths
         sanitized.append(event)
 
-    return sanitized
+    # Drop dangling UPDATE events that do not have a matching RECYCLE in this case.
+    dangling_shafts = {
+        shaft_id
+        for shaft_id in range(1, ELEVATOR_COUNT + 1)
+        if update_seen[shaft_id] and not recycle_seen[shaft_id]
+    }
+    if not dangling_shafts:
+        return sanitized
+
+    repaired: list[SpecialEventSpec] = []
+    for event in sanitized:
+        if event.kind == "update" and event.elevator_id in dangling_shafts:
+            continue
+        repaired.append(event)
+    return repaired
+
+
+def validate_hw7_special_constraints(requests: list[InputRequest], mutual: bool) -> None:
+    in_double = {shaft_id: False for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    last_special_time: dict[int, Decimal | None] = {
+        shaft_id: None for shaft_id in range(1, ELEVATOR_COUNT + 1)
+    }
+    maint_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    update_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+    recycle_count = {shaft_id: 0 for shaft_id in range(1, ELEVATOR_COUNT + 1)}
+
+    for request in requests:
+        shaft_id: int | None = None
+        kind: str | None = None
+        if isinstance(request, MaintRequest):
+            shaft_id = request.elevator_id
+            kind = "maint"
+        elif isinstance(request, UpdateRequest):
+            shaft_id = request.elevator_id
+            kind = "update"
+        elif isinstance(request, RecycleRequest):
+            shaft_id = request.elevator_id - ELEVATOR_COUNT
+            kind = "recycle"
+
+        if shaft_id is None or kind is None:
+            continue
+
+        last_time = last_special_time[shaft_id]
+        if last_time is not None and request.timestamp - last_time < Decimal("8.0"):
+            raise RuntimeError(
+                f"special requests on shaft {shaft_id} must be at least 8.0s apart"
+            )
+        last_special_time[shaft_id] = request.timestamp
+
+        if kind == "maint":
+            if in_double[shaft_id]:
+                raise RuntimeError(f"MAINT on shaft {shaft_id} must be in NORMAL mode")
+            maint_count[shaft_id] += 1
+            if mutual and maint_count[shaft_id] > 1:
+                raise RuntimeError(
+                    f"mutual mode requires at most one MAINT per shaft, got {maint_count[shaft_id]} on shaft {shaft_id}"
+                )
+            continue
+
+        if kind == "update":
+            if in_double[shaft_id]:
+                raise RuntimeError(f"UPDATE on shaft {shaft_id} must be in NORMAL mode")
+            update_count[shaft_id] += 1
+            if update_count[shaft_id] > 1:
+                raise RuntimeError(
+                    f"shaft {shaft_id} can have at most one UPDATE request"
+                )
+            in_double[shaft_id] = True
+            continue
+
+        if not in_double[shaft_id]:
+            raise RuntimeError(f"RECYCLE on shaft {shaft_id} must be in DOUBLE mode")
+        recycle_count[shaft_id] += 1
+        if recycle_count[shaft_id] > 1:
+            raise RuntimeError(
+                f"shaft {shaft_id} can have at most one RECYCLE request"
+            )
+        in_double[shaft_id] = False
+
+    for shaft_id in range(1, ELEVATOR_COUNT + 1):
+        if in_double[shaft_id]:
+            raise RuntimeError(
+                f"shaft {shaft_id} ends in DOUBLE mode: generated UPDATE without matching RECYCLE"
+            )
+        if update_count[shaft_id] != recycle_count[shaft_id]:
+            raise RuntimeError(
+                f"shaft {shaft_id} has unmatched UPDATE/RECYCLE counts: {update_count[shaft_id]} vs {recycle_count[shaft_id]}"
+            )
+
+    return
 
 
 def materialize_special_events(
@@ -517,7 +643,7 @@ def generate_stress_special_requests(
 ) -> tuple[list[InputRequest], int, list[SpecialEventSpec]]:
     max_special = max(0, request_count - 1)
     units = build_stress_special_units(stress_mode, rng, lower_tenths, upper_tenths, mutual)
-    selected_events = sanitize_special_events_for_mode(select_special_units(units, max_special, mutual))
+    selected_events = sanitize_special_events_for_mode(select_special_units(units, max_special, mutual), mutual)
 
     if (not selected_events) and max_special >= 2:
         center = lower_tenths + (upper_tenths - lower_tenths) // 2
@@ -528,7 +654,8 @@ def generate_stress_special_requests(
                 [
                     SpecialEventSpec(kind="update", tenths=fallback_update, elevator_id=1),
                     SpecialEventSpec(kind="recycle", tenths=fallback_recycle, elevator_id=1 + ELEVATOR_COUNT),
-                ]
+                ],
+                mutual,
             )
 
     requests, next_request_id = materialize_special_events(rng, selected_events, next_request_id)
@@ -933,6 +1060,7 @@ def main() -> None:
         requests = sort_requests(requests)
         if args.mutual:
             validate_mutual_case(requests)
+        validate_hw7_special_constraints(requests, args.mutual)
 
         case_path = output_dir / f"{case_index}.in"
         no_timestamp_case_path = output_dir / f"{case_index}.no.in"
