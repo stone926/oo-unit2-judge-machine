@@ -4,9 +4,12 @@
 
 本文档以测评机放在 `<repo_root>/test` 且在项目根目录下运行命令下为例。
 
-测评机依赖（设测评机所在目录为`<machine_root>`）：
-- 数据投喂程序：`<machine_root>/dependency/datainput`
-- 官方输入输出包：`<machine_root>/dependency/elevator3-2026.jar`
+运行环境：
+
+- Python `>= 3.10`。
+- JDK，且 `java`、`javac`、`jar` 位于 `PATH`。
+- 官方输入输出包：`<machine_root>/dependency/elevator3-2026.jar`。
+- Windows 默认使用官方 `dependency/datainput`；macOS/Linux 默认使用内置的 `portable_datainput.py`，无需为脚本设置可执行位。
 
 ## 1. 快速开始
 
@@ -20,6 +23,12 @@ python test/run.py --once --judger-args --main-class YourMainClass
 
 ```bash
 python test/run.py --once
+```
+
+macOS 通常使用 `python3` 命令：
+
+```bash
+python3 test/run.py --once
 ```
 
 持续循环评测（直到 Ctrl+C）：
@@ -38,7 +47,8 @@ python test/run.py --once --mutual
 
 默认依赖路径：
 
-- 数据投喂程序：`test/dependency/datainput`
+- Windows 数据投喂程序：`test/dependency/datainput`
+- macOS/Linux 数据投喂程序：`test/portable_datainput.py`
 - 官方输入输出包：`test/dependency/elevator3-2026.jar`
 
 默认产物路径：
@@ -88,9 +98,13 @@ python test/data_generator.py
 
 并在终端打印本次随机种子 `seed`，便于复现。
 
+生成器先在临时目录完成整批生成和复验，全部合法后才替换目标目录中的旧测试点；生成失败不会留下半套数据。
+发布与判题读取使用同一语料锁；若另一进程正在使用该输入目录，会直接报错而不会读到半套数据。
+
 ### 4.1 主要参数
 
 - `--count`：测试点个数，默认 `20`。
+- `--seed`：指定 64 位随机种子（支持十进制或 `0x` 前缀），用于精确复现；省略时随机生成并打印。
 - `--mutual`：按互测限制生成。
 - `--min-requests` / `--max-requests`：每个测试点总请求数范围。
 - `--output-dir`：输出目录。
@@ -119,6 +133,12 @@ python test/data_generator.py
 python test/data_generator.py --count 20 --stress-mode auto
 ```
 
+按打印出的种子复现：
+
+```bash
+python test/data_generator.py --count 20 --seed 123456789 --stress-mode auto
+```
+
 只测链式特殊请求：
 
 ```bash
@@ -139,7 +159,7 @@ python test/data_generator.py --mutual --count 20 --min-requests 55 --max-reques
 python test/judger.py
 ```
 
-默认会从 `src` 打包为 `test/project.jar`，主类默认 `oo.Main`。
+默认会从 `src` 打包为 `test/project.jar`，主类默认 `oo.Main`。测评机会记录源码、官方依赖和主类的指纹；任一项变化时自动重建，`--rebuild` 可强制重建。构建采用临时文件原子替换，失败时保留上一份可用 jar。
 
 ### 5.1 常用参数
 
@@ -154,11 +174,19 @@ python test/judger.py
 - `--mutual`：启用互测输入限制校验。
 - `--timeout`：单测点超时秒数。
 
+未找到测试点、显式指定了不存在的 case、任一 case 失败或子进程异常时，进程都会返回非零退出码。单个 case 的程序输出与诊断输出合计限制为 32 MiB，超限会终止整棵子进程树并判失败。
+
+所选 `.in` 文件会先复制为有大小上限的不可变字节快照，输入器和语义判定都只使用同一份快照，避免运行期间原文件变化导致“投喂内容”和“校验内容”不一致。Windows 下通过 Job Object 管理输入器、Java 程序及其后代；即使启动器在进程纳入 Job 前的窄窗口内异常退出，等待闸门的包装进程也会检测父进程死亡并自行结束。macOS/Linux 下使用独立会话和进程组清理；调度器中断时先让判题器执行级联清理，再强制终止残留进程组。
+
+同一测评机目录同时只允许运行一个 `judger.py` 实例，以防输出、日志和构建产物互相覆盖；并发启动会立即报错，崩溃后操作系统会自动释放锁。
+
 ### 5.2 超时与互测校验
 
-- 默认超时：`120s`。
+- 普通模式未显式指定超时时：至少 `120s`；若测试点更晚，则自动提高到“实际最后输入时间向上取整 + 40s”。
 - `--mutual` 下默认超时：`180s`。
 - 显式传入 `--timeout` 时，以显式值为准。
+- `--timeout` 必须是有限正数。
+- `--timeout` 必须晚于所选测试点的最后一条输入；否则测评会在构建和运行前直接报配置错误。自定义较大的 `--last-request-limit` 时，应同步增大 `--timeout`。
 
 互测输入校验（由 `judger.py` 和 `data_generator.py` 共同保证）：
 
@@ -186,3 +214,14 @@ python test/run.py --once --generator-args --output-dir test/custom_in --stress-
 ```bash
 python test/run.py --once --judger-args --main-class YourMainClass --rebuild
 ```
+
+## 7. 自检
+
+运行测评机自身回归测试：
+
+```bash
+cd test
+python -m unittest discover -v
+```
+
+回归集覆盖输入约束、生成器属性、特殊请求状态机、维修测试路线、输入快照同源、跨平台定时投喂及官方 `ElevatorInput` 集成、构建原子性、超时/输出洪泛、Windows Job 与 POSIX 进程组清理、启动硬崩溃窗口和调度入口退出码。

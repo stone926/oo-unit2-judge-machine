@@ -4,12 +4,16 @@ import atexit
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+import math
+import os
 from pathlib import Path
 import signal
 import shutil
 import subprocess
 import sys
 import time
+
+from windows_process_job import WindowsJob
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -18,8 +22,11 @@ OUTPUT_DIR = SCRIPT_DIR / "out"
 JUDGE_DIR = SCRIPT_DIR / "judge"
 DATA_GENERATOR = SCRIPT_DIR / "data_generator.py"
 JUDGER = SCRIPT_DIR / "judger.py"
-JUDGER_CASE_TEMP_GLOB = ".judge_case_*_tmp"
-JUDGER_BUILD_TEMP_NAME = ".judge_build_tmp"
+IS_WINDOWS = os.name == "nt"
+WINDOWS_PROCESS_FLAGS = (
+    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
+)
+ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 RUNNER_CLEANUP_GUARDS_INSTALLED = False
 
 
@@ -38,6 +45,16 @@ class RuntimePaths:
     judger_input_dir: Path
     judger_output_dir: Path
     judger_log_dir: Path
+
+
+def parse_nonnegative_float(raw_value: str) -> float:
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be a finite nonnegative number")
+    return value
 
 
 def split_passthrough_args(raw_args: list[str]) -> tuple[list[str], list[str], list[str]]:
@@ -84,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--sleep-seconds",
-        type=float,
+        type=parse_nonnegative_float,
         default=0.0,
         help="sleep between rounds",
     )
@@ -130,32 +147,85 @@ def resolve_runtime_paths(generator_args: list[str], judger_args: list[str]) -> 
     )
 
 
-def discover_judger_temp_dirs(base_dir: Path = SCRIPT_DIR) -> set[Path]:
-    discovered = {path.resolve() for path in base_dir.glob(JUDGER_CASE_TEMP_GLOB) if path.is_dir()}
-    build_dir = base_dir / JUDGER_BUILD_TEMP_NAME
-    if build_dir.is_dir():
-        discovered.add(build_dir.resolve())
-    return discovered
+def terminate_process(process: subprocess.Popen | None) -> bool:
+    if process is None:
+        return True
+    root_running = process.poll() is None
+    if IS_WINDOWS and not root_running:
+        return True
+    if process.pid > 0:
+        if IS_WINDOWS:
+            ctrl_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+            if ctrl_break is not None:
+                try:
+                    process.send_signal(ctrl_break)
+                    process.wait(timeout=0.5)
+                    return True
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        else:
+            # POSIX commands run in a new session.  The group can still have
+            # live descendants after its original leader exits, so always
+            # signal the process group before considering cleanup complete.
+            killpg = getattr(os, "killpg", None)
+            sigterm = getattr(signal, "SIGTERM", None)
+            sigkill = getattr(signal, "SIGKILL", None)
+            if callable(killpg) and root_running and sigterm is not None:
+                try:
+                    # Give judger.py a chance to run its own signal cleanup;
+                    # its Java/feeder children deliberately live in separate
+                    # process groups.
+                    killpg(process.pid, sigterm)
+                    process.wait(timeout=3)
+                except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+                    pass
+                root_running = process.poll() is None
+            if callable(killpg) and sigkill is not None:
+                try:
+                    killpg(process.pid, sigkill)
+                except (ProcessLookupError, OSError):
+                    pass
+    if not root_running:
+        return True
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=3)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return process.poll() is not None
 
 
-def cleanup_judger_temp_dirs(base_dir: Path = SCRIPT_DIR) -> list[Path]:
-    removed: list[Path] = []
-    for temp_dir in sorted(discover_judger_temp_dirs(base_dir), key=lambda path: str(path)):
-        try:
-            shutil.rmtree(temp_dir)
-        except OSError:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        if not temp_dir.exists():
-            removed.append(temp_dir)
-    return removed
+def register_process(process: subprocess.Popen | None) -> None:
+    if process is not None:
+        ACTIVE_PROCESSES.add(process)
 
 
-def format_cleaned_dirs(paths: list[Path]) -> str:
-    return ", ".join(path.name for path in paths)
+def unregister_process(process: subprocess.Popen | None) -> None:
+    if process is not None:
+        ACTIVE_PROCESSES.discard(process)
+
+
+def terminate_active_processes() -> None:
+    for process in list(ACTIVE_PROCESSES):
+        if terminate_process(process):
+            ACTIVE_PROCESSES.discard(process)
 
 
 def on_exit_signal(signum: int, _frame: object) -> None:
-    cleanup_judger_temp_dirs()
+    terminate_active_processes()
     if signum == getattr(signal, "SIGINT", None):
         raise KeyboardInterrupt
     raise SystemExit(128 + signum)
@@ -165,7 +235,7 @@ def install_cleanup_guards() -> None:
     global RUNNER_CLEANUP_GUARDS_INSTALLED
     if RUNNER_CLEANUP_GUARDS_INSTALLED:
         return
-    atexit.register(cleanup_judger_temp_dirs)
+    atexit.register(terminate_active_processes)
     for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         target_signal = getattr(signal, signal_name, None)
         if target_signal is None:
@@ -189,12 +259,36 @@ def append_flag_once(arguments: list[str], flag: str, enabled: bool) -> list[str
 
 def run_command(command: list[str], name: str) -> int:
     print(f"[{now_text()}] start {name}: {subprocess.list2cmdline(command)}", flush=True)
-    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    process: subprocess.Popen | None = None
+    windows_job: WindowsJob | None = None
+    try:
+        if IS_WINDOWS:
+            windows_job = WindowsJob()
+            process = windows_job.launch(
+                command,
+                cwd=REPO_ROOT,
+                creationflags=WINDOWS_PROCESS_FLAGS,
+            )
+        else:
+            process = subprocess.Popen(
+                command,
+                cwd=REPO_ROOT,
+                start_new_session=True,
+            )
+        register_process(process)
+        return_code = process.wait()
+    finally:
+        if windows_job is not None:
+            windows_job.terminate()
+            windows_job.close()
+        stopped = terminate_process(process)
+        if stopped:
+            unregister_process(process)
     print(
-        f"[{now_text()}] finish {name}: return code = {completed.returncode}",
+        f"[{now_text()}] finish {name}: return code = {return_code}",
         flush=True,
     )
-    return completed.returncode
+    return return_code
 
 
 def next_available_path(target_dir: Path, file_name: str) -> Path:
@@ -239,12 +333,6 @@ def archive_logs(input_dir: Path, output_dir: Path, log_dir: Path) -> Path | Non
 
 def main() -> None:
     install_cleanup_guards()
-    startup_cleaned = cleanup_judger_temp_dirs()
-    if startup_cleaned:
-        print(
-            f"[{now_text()}] cleaned stale judge temp dirs: {format_cleaned_dirs(startup_cleaned)}",
-            flush=True,
-        )
     args = parse_args()
     generator_script = DATA_GENERATOR
     generator_args = append_flag_once(args.generator_args, "--mutual", args.mutual)
@@ -258,24 +346,22 @@ def main() -> None:
     if not JUDGER.exists():
         raise SystemExit(f"judger does not exist: {JUDGER}")
     if runtime_paths.generator_output_dir != runtime_paths.judger_input_dir:
-        print(
-            (
-                f"[{now_text()}] warning: data_generator writes to "
-                f"{runtime_paths.generator_output_dir}, but judger reads from "
-                f"{runtime_paths.judger_input_dir}"
-            ),
-            flush=True,
+        raise SystemExit(
+            "data_generator output directory must match judger input directory: "
+            f"{runtime_paths.generator_output_dir} != {runtime_paths.judger_input_dir}"
         )
 
     try:
         while True:
             print(f"[{now_text()}] ===== round {round_index} =====", flush=True)
 
-            pre_archive_dir = archive_logs(
-                input_dir=runtime_paths.judger_input_dir,
-                output_dir=runtime_paths.judger_output_dir,
-                log_dir=runtime_paths.judger_log_dir,
-            )
+            pre_archive_dir = None
+            if not args.once:
+                pre_archive_dir = archive_logs(
+                    input_dir=runtime_paths.judger_input_dir,
+                    output_dir=runtime_paths.judger_output_dir,
+                    log_dir=runtime_paths.judger_log_dir,
+                )
             if pre_archive_dir is not None:
                 print(
                     f"[{now_text()}] archived leftover judge logs to {pre_archive_dir}",
@@ -298,29 +384,32 @@ def main() -> None:
                     flush=True,
                 )
 
-            archive_dir = archive_logs(
-                input_dir=runtime_paths.judger_input_dir,
-                output_dir=runtime_paths.judger_output_dir,
-                log_dir=runtime_paths.judger_log_dir,
-            )
-            if archive_dir is not None:
+            archive_dir = None
+            if not args.once:
+                archive_dir = archive_logs(
+                    input_dir=runtime_paths.judger_input_dir,
+                    output_dir=runtime_paths.judger_output_dir,
+                    log_dir=runtime_paths.judger_log_dir,
+                )
+            if args.once:
+                print(f"[{now_text()}] judge artifacts kept in place", flush=True)
+            elif archive_dir is not None:
                 print(f"[{now_text()}] archived judge logs to {archive_dir}", flush=True)
             else:
                 print(f"[{now_text()}] no judge logs to archive", flush=True)
 
-            round_cleaned = cleanup_judger_temp_dirs()
-            if round_cleaned:
-                print(
-                    f"[{now_text()}] cleaned judge temp dirs: {format_cleaned_dirs(round_cleaned)}",
-                    flush=True,
-                )
+            round_exit_code = generator_code
+            if round_exit_code == 0 and judger_code is not None:
+                round_exit_code = judger_code
 
-            if generator_code != 0 or (judger_code is not None and judger_code != 0):
+            if round_exit_code != 0:
                 print(f"[{now_text()}] round {round_index} finished with errors", flush=True)
             else:
                 print(f"[{now_text()}] round {round_index} finished", flush=True)
 
             if args.once:
+                if round_exit_code != 0:
+                    raise SystemExit(round_exit_code)
                 break
 
             round_index += 1
@@ -328,13 +417,9 @@ def main() -> None:
                 time.sleep(args.sleep_seconds)
     except KeyboardInterrupt:
         print(f"\n[{now_text()}] loop stopped by user", flush=True)
+        raise SystemExit(130)
     finally:
-        final_cleaned = cleanup_judger_temp_dirs()
-        if final_cleaned:
-            print(
-                f"[{now_text()}] cleaned judge temp dirs on exit: {format_cleaned_dirs(final_cleaned)}",
-                flush=True,
-            )
+        terminate_active_processes()
 
 
 if __name__ == "__main__":
