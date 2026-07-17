@@ -4,21 +4,28 @@ import argparse
 from dataclasses import dataclass
 from decimal import Decimal
 from decimal import InvalidOperation
+import math
 from pathlib import Path
 import random
+import shutil
+import sys
+import tempfile
 
 from judge_common import (
     ALL_FLOORS,
     ELEVATOR_COUNT,
+    INPUT_CORPUS_LOCK_NAME,
     InputRequest,
     MAINT_TARGET_FLOORS,
+    MAX_JAVA_INT,
+    MAX_REQUESTS,
     MUTUAL_MAX_REQUESTS,
     MaintRequest,
     PersonRequest,
     RecycleRequest,
     UpdateRequest,
-    clean_matching_files,
     ensure_directory,
+    exclusive_file_lock,
     format_input_timestamp,
     load_case,
     validate_hw7_special_constraints,
@@ -32,21 +39,13 @@ DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "in"
 DEFAULT_MODE = "default"
 MUTUAL_MODE = "mutual"
 DEFAULT_MIN_REQUESTS = 50
-DEFAULT_MAX_REQUESTS = 100
+DEFAULT_MAX_REQUESTS = MAX_REQUESTS
+MAX_SEED = (1 << 64) - 1
 DEFAULT_LAST_REQUEST_LIMIT_SECONDS = Decimal("80.0")
 MUTUAL_FIRST_TENTHS = 10
 MUTUAL_LAST_TENTHS = 500
 DEFAULT_MAINT_RATIO = 0.6
 DEFAULT_UPDATE_RATIO = 0.05
-SPECIAL_LOWER_OFFSET_TENTHS = 20
-MAINT_LATEST_GUARD_TENTHS = 60
-UPDATE_LATEST_GUARD_TENTHS = 120
-OVERLAP_UPDATE_LOWER_OFFSET_TENTHS = 110
-OVERLAP_MAINT_TO_UPDATE_GAP_TENTHS = 90
-RECYCLE_MIN_GAP_TENTHS = 80
-RECYCLE_MAX_GAP_DEFAULT_TENTHS = 140
-RECYCLE_MAX_GAP_MUTUAL_TENTHS = 110
-RECYCLE_FALLBACK_MIN_GAP_TENTHS = 80
 
 STRESS_MODE_NONE = "none"
 STRESS_MODE_SPECIAL_BURST = "special-burst"
@@ -101,6 +100,8 @@ def parse_decimal_seconds(raw: str) -> Decimal:
         value = Decimal(raw)
     except InvalidOperation as exc:
         raise argparse.ArgumentTypeError(f"invalid decimal seconds: {raw}") from exc
+    if not value.is_finite():
+        raise argparse.ArgumentTypeError("value must be finite")
     if value <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
     scaled = value * Decimal("10")
@@ -114,8 +115,22 @@ def parse_ratio(raw: str) -> float:
         value = float(raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid ratio: {raw}") from exc
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError("ratio must be finite")
     if value < 0 or value > 0.6:
         raise argparse.ArgumentTypeError("ratio must be in [0, 0.6]")
+    return value
+
+
+def parse_seed(raw: str) -> int:
+    try:
+        normalized = raw.strip().lower()
+        base = 0 if normalized.startswith(("0x", "0o", "0b")) else 10
+        value = int(normalized, base)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid seed: {raw}") from exc
+    if value < 0 or value > MAX_SEED:
+        raise argparse.ArgumentTypeError(f"seed must be in [0, {MAX_SEED}]")
     return value
 
 
@@ -573,10 +588,12 @@ def generate_stress_special_requests(
     selected_events = sanitize_special_events_for_mode(select_special_units(units, max_special, mutual), mutual)
 
     if (not selected_events) and max_special >= 2:
-        center = lower_tenths + (upper_tenths - lower_tenths) // 2
-        fallback_update = clamp_tenths(center, lower_tenths, upper_tenths)
-        fallback_recycle = fallback_update + PRESSURE_BASE_UPDATE_RECYCLE_GAP_TENTHS
-        if fallback_recycle <= upper_tenths:
+        # A cycle needs exactly 8.0s of input window at minimum. Do not push the
+        # RECYCLE request beyond the caller's timestamp bound when the preferred
+        # 9.0s pressure gap does not fit.
+        if upper_tenths - lower_tenths >= SPECIAL_MIN_GAP_TENTHS:
+            fallback_update = lower_tenths
+            fallback_recycle = fallback_update + SPECIAL_MIN_GAP_TENTHS
             selected_events = sanitize_special_events_for_mode(
                 [
                     SpecialEventSpec(kind="update", tenths=fallback_update, elevator_id=1),
@@ -584,6 +601,12 @@ def generate_stress_special_requests(
                 ],
                 mutual,
             )
+
+    if (not selected_events) and max_special >= 1:
+        # Even a very short input window can carry a legal MAINT request. This
+        # keeps a requested stress profile from silently becoming passenger-only.
+        center = lower_tenths + (upper_tenths - lower_tenths) // 2
+        selected_events = [SpecialEventSpec(kind="maint", tenths=center, elevator_id=1)]
 
     requests, next_request_id = materialize_special_events(rng, selected_events, next_request_id)
     return requests, next_request_id, selected_events
@@ -741,12 +764,18 @@ def build_recycle(tenths: int, elevator_id: int) -> RecycleRequest:
     )
 
 
-def choose_special_counts(request_count: int, maint_ratio: float, update_ratio: float) -> tuple[int, int]:
-    max_cycle = min(ELEVATOR_COUNT, max(0, (request_count - 6) // 10))
-    cycle_count = min(max_cycle, int(round(request_count * update_ratio / 2)))
-    # Keep maintenance and update/recycle quotas independent: each can reach the full shaft count.
-    max_maint = min(ELEVATOR_COUNT, max(0, (request_count - 3) // 8))
-    maint_count = min(max_maint, int(round(request_count * maint_ratio)))
+def choose_special_counts(
+    request_count: int,
+    maint_ratio: float,
+    update_ratio: float,
+    mutual: bool = False,
+) -> tuple[int, int]:
+    # Each shaft can have at most one UPDATE/RECYCLE cycle. In default mode,
+    # MAINT requests may repeat on a shaft as long as they are 8.0s apart; only
+    # mutual mode limits maintenance to one request per shaft.
+    cycle_count = min(ELEVATOR_COUNT, int(round(request_count * update_ratio / 2)))
+    maint_target = int(round(request_count * maint_ratio))
+    maint_count = min(ELEVATOR_COUNT, maint_target) if mutual else maint_target
     return maint_count, cycle_count
 
 
@@ -775,45 +804,92 @@ def generate_special_requests(
     cycle_count: int,
     mutual: bool,
 ) -> tuple[list[InputRequest], int]:
+    if upper_tenths < lower_tenths:
+        raise ValueError("special-request timestamp window is empty")
+
     requests: list[InputRequest] = []
     shafts = list(range(1, ELEVATOR_COUNT + 1))
-    maint_shafts = sorted(rng.sample(shafts, k=maint_count)) if maint_count > 0 else []
-    cycle_shafts = sorted(rng.sample(shafts, k=cycle_count)) if cycle_count > 0 else []
-    overlap_shafts = set(maint_shafts).intersection(cycle_shafts)
+    window_tenths = upper_tenths - lower_tenths
 
-    update_times_by_shaft: dict[int, int] = {}
-    for shaft_id in cycle_shafts:
-        update_lower = lower_tenths + SPECIAL_LOWER_OFFSET_TENTHS
-        if shaft_id in overlap_shafts:
-            # When a shaft has both MAINT and UPDATE, schedule UPDATE later to keep MAINT in NORMAL mode.
-            update_lower = max(update_lower, lower_tenths + OVERLAP_UPDATE_LOWER_OFFSET_TENTHS)
-        update_upper = max(update_lower, upper_tenths - UPDATE_LATEST_GUARD_TENTHS)
-        update_tenths = rng.randint(update_lower, update_upper)
-        update_times_by_shaft[shaft_id] = update_tenths
+    # Build independent 8.0s slots for every shaft. Selecting any subset keeps
+    # repeated MAINT requests legal. A cycle occupies two adjacent slots, so
+    # every selected MAINT is either before UPDATE or after RECYCLE (NORMAL).
+    # No case can consume more than MAX_REQUESTS slots on one shaft. Capping
+    # avoids allocating proportional to an unusually large timestamp limit.
+    slot_count = min(
+        window_tenths // SPECIAL_MIN_GAP_TENTHS + 1,
+        MAX_REQUESTS,
+    )
+    slot_span = (slot_count - 1) * SPECIAL_MIN_GAP_TENTHS
+    slot_slack = window_tenths - slot_span
+    slots_by_shaft: dict[int, list[int]] = {}
+    for shaft_id in shafts:
+        start_tenths = lower_tenths + rng.randint(0, slot_slack)
+        slots_by_shaft[shaft_id] = [
+            start_tenths + slot_index * SPECIAL_MIN_GAP_TENTHS
+            for slot_index in range(slot_count)
+        ]
 
-        recycle_gap = rng.randint(
-            RECYCLE_MIN_GAP_TENTHS,
-            RECYCLE_MAX_GAP_MUTUAL_TENTHS if mutual else RECYCLE_MAX_GAP_DEFAULT_TENTHS,
+    requested_cycle_count = min(cycle_count, ELEVATOR_COUNT)
+    if slot_count < 2:
+        realized_cycle_count = 0
+    else:
+        maintain_target_with_no_cycles = (
+            min(maint_count, ELEVATOR_COUNT)
+            if mutual
+            else min(maint_count, ELEVATOR_COUNT * slot_count)
         )
-        recycle_tenths = min(upper_tenths, update_tenths + recycle_gap)
-        if recycle_tenths <= update_tenths + 60:
-            recycle_tenths = update_tenths + RECYCLE_FALLBACK_MIN_GAP_TENTHS
-        requests.append(build_update(update_tenths, shaft_id))
-        requests.append(build_recycle(recycle_tenths, shaft_id + 6))
 
-    for elevator_id in maint_shafts:
-        maint_lower = lower_tenths + SPECIAL_LOWER_OFFSET_TENTHS
-        if elevator_id in overlap_shafts:
-            # Ensure MAINT is always before UPDATE on the same shaft.
-            update_tenths = update_times_by_shaft[elevator_id]
-            maint_upper = min(
-                upper_tenths - MAINT_LATEST_GUARD_TENTHS,
-                update_tenths - OVERLAP_MAINT_TO_UPDATE_GAP_TENTHS,
-            )
+        def maint_capacity(realized_cycles: int) -> int:
+            if not mutual:
+                return ELEVATOR_COUNT * slot_count - 2 * realized_cycles
+            if slot_count == 2:
+                return ELEVATOR_COUNT - realized_cycles
+            return ELEVATOR_COUNT
+
+        realized_cycle_count = requested_cycle_count
+        while (
+            realized_cycle_count > 0
+            and maint_capacity(realized_cycle_count) < maintain_target_with_no_cycles
+        ):
+            realized_cycle_count -= 1
+
+    cycle_shafts = (
+        sorted(rng.sample(shafts, k=realized_cycle_count))
+        if realized_cycle_count > 0
+        else []
+    )
+    reserved_cycle_slots: dict[int, set[int]] = {shaft_id: set() for shaft_id in shafts}
+    for shaft_id in cycle_shafts:
+        cycle_start_index = rng.randrange(slot_count - 1)
+        update_tenths = slots_by_shaft[shaft_id][cycle_start_index]
+        recycle_tenths = slots_by_shaft[shaft_id][cycle_start_index + 1]
+        reserved_cycle_slots[shaft_id].update((cycle_start_index, cycle_start_index + 1))
+        requests.append(build_update(update_tenths, shaft_id))
+        requests.append(build_recycle(recycle_tenths, shaft_id + ELEVATOR_COUNT))
+
+    maint_slots: list[tuple[int, int]] = []
+    for shaft_id in shafts:
+        available_slots = [
+            tenths
+            for slot_index, tenths in enumerate(slots_by_shaft[shaft_id])
+            if slot_index not in reserved_cycle_slots[shaft_id]
+        ]
+        if mutual and available_slots:
+            maint_slots.append((shaft_id, rng.choice(available_slots)))
         else:
-            maint_upper = upper_tenths - MAINT_LATEST_GUARD_TENTHS
-        tenths = rng.randint(maint_lower, max(maint_lower, maint_upper))
-        requests.append(build_maint(next_request_id, tenths, elevator_id, rng.choice(MAINT_TARGET_FLOORS)))
+            maint_slots.extend((shaft_id, tenths) for tenths in available_slots)
+    rng.shuffle(maint_slots)
+
+    for elevator_id, tenths in maint_slots[:maint_count]:
+        requests.append(
+            build_maint(
+                next_request_id,
+                tenths,
+                elevator_id,
+                rng.choice(MAINT_TARGET_FLOORS),
+            )
+        )
         next_request_id += 1
     return requests, next_request_id
 
@@ -831,6 +907,135 @@ def sort_requests(requests: list[InputRequest]) -> list[InputRequest]:
     return sorted(requests, key=sort_key)
 
 
+def validate_generated_case(
+    requests: list[InputRequest],
+    expected_count: int,
+    lower_tenths: int,
+    upper_tenths: int,
+    mutual: bool,
+) -> None:
+    """Apply generation-specific postconditions before a case is published."""
+    if len(requests) != expected_count:
+        raise RuntimeError(
+            f"generated {len(requests)} requests, expected exactly {expected_count}"
+        )
+    if not 1 <= len(requests) <= MAX_REQUESTS:
+        raise RuntimeError(f"generated request count must be in [1, {MAX_REQUESTS}]")
+    if upper_tenths < lower_tenths:
+        raise RuntimeError("generated timestamp window is empty")
+
+    seen_ids: set[int] = set()
+    previous_timestamp: Decimal | None = None
+    for request in requests:
+        timestamp = request.timestamp
+        scaled_timestamp = timestamp * Decimal("10")
+        if not timestamp.is_finite() or scaled_timestamp != scaled_timestamp.to_integral_value():
+            raise RuntimeError(f"generated timestamp must have one-decimal precision: {timestamp}")
+        timestamp_tenths = int(scaled_timestamp)
+        if timestamp_tenths < lower_tenths or timestamp_tenths > upper_tenths:
+            raise RuntimeError(
+                f"generated timestamp {timestamp} is outside "
+                f"[{format_input_timestamp(lower_tenths)}, {format_input_timestamp(upper_tenths)}]"
+            )
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise RuntimeError("generated timestamps are not nondecreasing")
+        previous_timestamp = timestamp
+
+        request_id: int | None = None
+        if isinstance(request, PersonRequest):
+            request_id = request.person_id
+        elif isinstance(request, MaintRequest):
+            request_id = request.worker_id
+        if request_id is not None:
+            if not 1 <= request_id <= MAX_JAVA_INT:
+                raise RuntimeError(f"generated request id is not a positive Java int: {request_id}")
+            if request_id in seen_ids:
+                raise RuntimeError(f"generated duplicate request id: {request_id}")
+            seen_ids.add(request_id)
+
+    validate_hw7_special_constraints(requests, mutual)
+    if mutual:
+        validate_mutual_case(requests)
+
+
+def validate_serialized_case(path: Path, expected_requests: list[InputRequest]) -> None:
+    loaded_requests = load_case(path)
+    if loaded_requests != expected_requests:
+        raise RuntimeError(f"serialized case differs after round-trip parsing: {path}")
+
+
+def publish_generated_cases(staging_dir: Path, output_dir: Path) -> None:
+    """Publish a fully validated corpus and restore the old one if publishing fails."""
+    ensure_directory(output_dir)
+    backup_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.backup-", dir=output_dir.parent)
+    )
+    old_files = sorted(
+        (path for path in output_dir.glob("*.in") if path.is_file()),
+        key=lambda path: path.name,
+    )
+    staged_files = sorted(
+        (path for path in staging_dir.glob("*.in") if path.is_file()),
+        key=lambda path: path.name,
+    )
+    old_names = {path.name for path in old_files}
+    installed_files: list[Path] = []
+    try:
+        for old_path in old_files:
+            old_path.replace(backup_dir / old_path.name)
+        for staged_path in staged_files:
+            installed_path = output_dir / staged_path.name
+            staged_path.replace(installed_path)
+            installed_files.append(installed_path)
+    except BaseException as publish_error:
+        rollback_errors: list[str] = []
+        for installed_path in reversed(installed_files):
+            if installed_path.exists():
+                try:
+                    installed_path.replace(staging_dir / installed_path.name)
+                except BaseException as rollback_error:
+                    rollback_errors.append(
+                        f"cannot remove partially installed {installed_path}: {rollback_error}"
+                    )
+                    try:
+                        installed_path.unlink()
+                    except BaseException as unlink_error:
+                        rollback_errors.append(
+                            f"cannot delete partially installed {installed_path}: {unlink_error}"
+                        )
+        for old_path in old_files:
+            backup_path = backup_dir / old_path.name
+            if not backup_path.exists():
+                continue
+            try:
+                backup_path.replace(output_dir / backup_path.name)
+            except BaseException as rollback_error:
+                rollback_errors.append(
+                    f"cannot restore {backup_path.name}: {rollback_error}"
+                )
+
+        remaining_backups = [
+            backup_dir / old_path.name
+            for old_path in old_files
+            if (backup_dir / old_path.name).exists()
+        ]
+        stray_installed = [
+            path
+            for path in installed_files
+            if path.name not in old_names and path.exists()
+        ]
+        if remaining_backups or stray_installed:
+            details = "; ".join(rollback_errors) if rollback_errors else "unknown rollback error"
+            raise RuntimeError(
+                f"case publication failed and rollback was incomplete; rollback artifacts "
+                f"and any unrestored old files are retained in {backup_dir}; {details}"
+            ) from publish_error
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def resolve_request_bounds(mutual: bool, min_requests: int | None, max_requests: int | None) -> tuple[int, int]:
     resolved_min = DEFAULT_MIN_REQUESTS if min_requests is None else min_requests
     resolved_max = MUTUAL_MAX_REQUESTS if mutual else DEFAULT_MAX_REQUESTS
@@ -842,6 +1047,12 @@ def resolve_request_bounds(mutual: bool, min_requests: int | None, max_requests:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate elevator hw7 test cases.")
     parser.add_argument("--count", type=int, default=20, help="number of cases to generate")
+    parser.add_argument(
+        "--seed",
+        type=parse_seed,
+        default=None,
+        help="64-bit random seed; omitted uses a fresh random seed",
+    )
     parser.add_argument("--mutual", action="store_true", help="generate mutual-test-friendly cases")
     parser.add_argument("--min-requests", type=int, default=None, help="minimum total requests in each case")
     parser.add_argument("--max-requests", type=int, default=None, help="maximum total requests in each case")
@@ -874,107 +1085,168 @@ def main() -> None:
         raise SystemExit("--count must be positive")
     if min_requests <= 0 or max_requests <= 0 or min_requests > max_requests:
         raise SystemExit("invalid request count bounds")
+    if max_requests > MAX_REQUESTS:
+        raise SystemExit(f"--max-requests cannot exceed {MAX_REQUESTS}")
     if args.mutual and max_requests > MUTUAL_MAX_REQUESTS:
         raise SystemExit(f"--max-requests cannot exceed {MUTUAL_MAX_REQUESTS} in mutual mode")
     if not args.mutual and last_limit_tenths < 10:
         raise SystemExit("--last-request-limit must be at least 1.0 in default mode")
 
-    seed = random.SystemRandom().getrandbits(64)
+    seed = args.seed if args.seed is not None else random.SystemRandom().getrandbits(64)
     rng = random.Random(seed)
+    # Print before generation so a failure is reproducible as well.
+    print(f"seed = {seed}", flush=True)
+
     output_dir = args.output_dir.resolve()
-    ensure_directory(output_dir)
-    clean_matching_files(output_dir, "*.in")
-
-    next_request_id = 1
+    ensure_directory(output_dir.parent)
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent)
+    )
     active_stress_modes: set[str] = set()
-    for case_index in range(1, args.count + 1):
-        request_count = rng.randint(min_requests, max_requests)
-        pattern = resolve_case_pattern(case_index, args.time_mode, args.pickup_mode, args.dropoff_mode)
-        stress_mode = resolve_stress_mode(case_index, args.stress_mode)
-        if stress_mode != STRESS_MODE_NONE:
-            active_stress_modes.add(stress_mode)
-        if args.mutual:
-            lower_tenths = MUTUAL_FIRST_TENTHS
-            upper_tenths = MUTUAL_LAST_TENTHS
-        else:
-            lower_tenths = rng.randint(0, min(20, max(0, last_limit_tenths - 200)))
-            upper_tenths = last_limit_tenths
+    ratio_quota_capped_cases = 0
+    window_reduced_ratio_cases = 0
+    stress_without_special_cases = 0
+    try:
+        for case_index in range(1, args.count + 1):
+            next_request_id = 1
+            request_count = rng.randint(min_requests, max_requests)
+            pattern = resolve_case_pattern(case_index, args.time_mode, args.pickup_mode, args.dropoff_mode)
+            stress_mode = resolve_stress_mode(case_index, args.stress_mode)
+            if stress_mode != STRESS_MODE_NONE:
+                active_stress_modes.add(stress_mode)
+            if args.mutual:
+                lower_tenths = MUTUAL_FIRST_TENTHS
+                upper_tenths = MUTUAL_LAST_TENTHS
+            else:
+                lower_tenths = rng.randint(0, min(20, max(0, last_limit_tenths - 200)))
+                upper_tenths = last_limit_tenths
 
-        special_events: list[SpecialEventSpec] = []
-        if stress_mode == STRESS_MODE_NONE:
-            maint_count, cycle_count = choose_special_counts(request_count, args.maint_ratio, args.update_ratio)
-            maint_count, cycle_count = reduce_special_counts_to_budget(maint_count, cycle_count, request_count)
-            special_requests, next_request_id = generate_special_requests(
-                rng,
-                next_request_id,
-                lower_tenths,
-                upper_tenths,
-                maint_count,
-                cycle_count,
-                args.mutual,
-            )
-        else:
-            special_requests, next_request_id, special_events = generate_stress_special_requests(
-                stress_mode,
-                rng,
-                next_request_id,
-                lower_tenths,
-                upper_tenths,
-                request_count,
-                args.mutual,
-            )
-
-        person_count = request_count - len(special_requests)
-        if stress_mode == STRESS_MODE_NONE:
-            person_timestamps = generate_person_timestamps(
-                pattern.time_mode,
-                rng,
-                person_count,
-                lower_tenths,
-                upper_tenths,
-            )
-            floor_pairs = generate_floor_pairs(person_count, pattern.pickup_mode, pattern.dropoff_mode, rng)
-        else:
-            person_timestamps = generate_stress_person_timestamps(
-                stress_mode,
-                rng,
-                person_count,
-                lower_tenths,
-                upper_tenths,
-                special_events,
-            )
-            floor_pairs = generate_stress_floor_pairs(
-                stress_mode,
-                person_count,
-                pattern.pickup_mode,
-                pattern.dropoff_mode,
-                rng,
-            )
-
-        requests: list[InputRequest] = []
-        for tenths, (from_floor, to_floor) in zip(person_timestamps, floor_pairs):
-            requests.append(
-                build_person(
-                    next_request_id,
-                    tenths,
-                    from_floor,
-                    to_floor,
-                    choose_person_weight(stress_mode, rng),
+            special_events: list[SpecialEventSpec] = []
+            if stress_mode == STRESS_MODE_NONE:
+                requested_maint = int(round(request_count * args.maint_ratio))
+                requested_cycles = int(round(request_count * args.update_ratio / 2))
+                maint_count, cycle_count = choose_special_counts(
+                    request_count,
+                    args.maint_ratio,
+                    args.update_ratio,
+                    args.mutual,
                 )
+                maint_count, cycle_count = reduce_special_counts_to_budget(
+                    maint_count,
+                    cycle_count,
+                    request_count,
+                )
+                if maint_count < requested_maint or cycle_count < requested_cycles:
+                    ratio_quota_capped_cases += 1
+                special_requests, next_request_id = generate_special_requests(
+                    rng,
+                    next_request_id,
+                    lower_tenths,
+                    upper_tenths,
+                    maint_count,
+                    cycle_count,
+                    args.mutual,
+                )
+                realized_maint = sum(isinstance(request, MaintRequest) for request in special_requests)
+                realized_cycles = sum(isinstance(request, UpdateRequest) for request in special_requests)
+                if realized_maint < maint_count or realized_cycles < cycle_count:
+                    window_reduced_ratio_cases += 1
+            else:
+                special_requests, next_request_id, special_events = generate_stress_special_requests(
+                    stress_mode,
+                    rng,
+                    next_request_id,
+                    lower_tenths,
+                    upper_tenths,
+                    request_count,
+                    args.mutual,
+                )
+                if not special_requests:
+                    stress_without_special_cases += 1
+
+            person_count = request_count - len(special_requests)
+            if person_count <= 0:
+                raise RuntimeError(f"case {case_index}: generator must reserve a person request")
+            if stress_mode == STRESS_MODE_NONE:
+                person_timestamps = generate_person_timestamps(
+                    pattern.time_mode,
+                    rng,
+                    person_count,
+                    lower_tenths,
+                    upper_tenths,
+                )
+                floor_pairs = generate_floor_pairs(
+                    person_count,
+                    pattern.pickup_mode,
+                    pattern.dropoff_mode,
+                    rng,
+                )
+            else:
+                person_timestamps = generate_stress_person_timestamps(
+                    stress_mode,
+                    rng,
+                    person_count,
+                    lower_tenths,
+                    upper_tenths,
+                    special_events,
+                )
+                floor_pairs = generate_stress_floor_pairs(
+                    stress_mode,
+                    person_count,
+                    pattern.pickup_mode,
+                    pattern.dropoff_mode,
+                    rng,
+                )
+
+            requests: list[InputRequest] = []
+            for tenths, (from_floor, to_floor) in zip(person_timestamps, floor_pairs):
+                requests.append(
+                    build_person(
+                        next_request_id,
+                        tenths,
+                        from_floor,
+                        to_floor,
+                        choose_person_weight(stress_mode, rng),
+                    )
+                )
+                next_request_id += 1
+
+            requests.extend(special_requests)
+            requests = sort_requests(requests)
+            validate_generated_case(
+                requests,
+                request_count,
+                lower_tenths,
+                upper_tenths,
+                args.mutual,
             )
-            next_request_id += 1
 
-        requests.extend(special_requests)
-        requests = sort_requests(requests)
-        if args.mutual:
-            validate_mutual_case(requests)
-        validate_hw7_special_constraints(requests, args.mutual)
+            case_path = staging_dir / f"{case_index}.in"
+            no_timestamp_case_path = staging_dir / f"{case_index}.no.in"
+            write_case(case_path, requests)
+            write_case_without_timestamp(no_timestamp_case_path, requests)
+            validate_serialized_case(case_path, requests)
+            no_timestamp_lines = no_timestamp_case_path.read_text(encoding="utf-8").splitlines()
+            if len(no_timestamp_lines) != request_count or any(
+                line.startswith("[") for line in no_timestamp_lines
+            ):
+                raise RuntimeError(
+                    f"case {case_index}: invalid timestamp-free serialization"
+                )
 
-        case_path = output_dir / f"{case_index}.in"
-        no_timestamp_case_path = output_dir / f"{case_index}.no.in"
-        write_case(case_path, requests)
-        write_case_without_timestamp(no_timestamp_case_path, requests)
-        load_case(case_path)
+        staged_files = [path for path in staging_dir.glob("*.in") if path.is_file()]
+        if len(staged_files) != args.count * 2:
+            raise RuntimeError(
+                f"staging contains {len(staged_files)} input files; expected {args.count * 2}"
+            )
+        ensure_directory(output_dir)
+        with exclusive_file_lock(
+            output_dir / INPUT_CORPUS_LOCK_NAME,
+            f"input corpus {output_dir}",
+        ):
+            publish_generated_cases(staging_dir, output_dir)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     print(f"generated {args.count} case(s) in {output_dir}")
     print(f"mode = {MUTUAL_MODE if args.mutual else DEFAULT_MODE}")
@@ -988,7 +1260,29 @@ def main() -> None:
     print(f"stress_mode = {args.stress_mode}")
     if active_stress_modes:
         print(f"stress_profiles = {','.join(sorted(active_stress_modes))}")
-    print(f"seed = {seed}")
+    if args.stress_mode != STRESS_MODE_NONE:
+        print(
+            "note: --maint-ratio and --update-ratio apply only when --stress-mode=none",
+            file=sys.stderr,
+        )
+    if ratio_quota_capped_cases:
+        print(
+            f"warning: requested ratios were capped by legal special-request quotas "
+            f"in {ratio_quota_capped_cases} case(s)",
+            file=sys.stderr,
+        )
+    if window_reduced_ratio_cases:
+        print(
+            f"warning: timestamp/state capacity reduced ratio-mode special requests "
+            f"in {window_reduced_ratio_cases} case(s)",
+            file=sys.stderr,
+        )
+    if stress_without_special_cases:
+        print(
+            f"warning: {stress_without_special_cases} stress case(s) could not reserve "
+            f"a special request because each case must contain a person request",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
