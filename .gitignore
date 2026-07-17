@@ -4,6 +4,8 @@ judge/
 judge_case_*/
 .judge*
 *.jar
+*.build.sha256
+.hw7-*.lock
 __pycache__/
 .vscode/
 .idea/
